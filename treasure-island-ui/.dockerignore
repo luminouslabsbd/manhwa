@@ -1,0 +1,53 @@
+# Git
+.git
+.gitignore
+.gitattributes
+
+# Build artifacts
+node_modules
+build
+dist
+.next
+out
+
+# IDE
+.vscode
+.idea
+*.swp
+*.swo
+*~
+.DS_Store
+
+# Environment
+.env
+.env.local
+.env.*.local
+
+# Logs
+*.log
+logs
+/tmp
+
+# Testing
+coverage
+.nyc_output
+
+# OS
+Thumbs.db
+.DS_Store
+
+# Docker
+docker-compose.override.yml
+Dockerfile
+.dockerignore
+
+# Development
+.claude
+*.jsonl
+.turbo
+
+# Large files
+*.psd
+*.mp4
+*.mov
+*.zip

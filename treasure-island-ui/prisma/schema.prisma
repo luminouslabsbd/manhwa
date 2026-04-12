@@ -1,0 +1,175 @@
+generator client {
+  provider = "prisma-client-js"
+}
+
+datasource db {
+  provider = "postgresql"
+}
+
+model User {
+  id         String  @id
+  email      String  @unique
+  password   String
+  name       String
+  role       String  @default("USER")
+  is_active  Boolean @default(true)
+  created_at String
+
+  @@map("users")
+}
+
+model Project {
+  id                   String  @id
+  name                 String
+  style_guide          String?
+  style_guide_filename String?
+  storyboard_filename  String?
+  status               String
+  created_at           String
+  base_image_path      String?
+  base_image_comfyui   String?
+  base_image_prompt    String?
+  base_image_seed      Int?
+  pipeline_model       String?
+  user_id              String?
+
+  @@map("projects")
+}
+
+model Episode {
+  id         String  @id
+  project_id String
+  number     Int
+  title      String
+  summary    String?
+  created_at String
+
+  @@map("episodes")
+}
+
+model Shot {
+  id               String   @id
+  episode_id       String
+  project_id       String
+  shot_number      Int
+  character        String?
+  shot_description String
+  environment      String
+  lighting         String
+  camera_angle     String
+  full_prompt      String
+  negative_prompt  String
+  seed             Int?
+  width            Int
+  height           Int
+  steps            Int
+  status           String
+  approved_image_id  String?
+  approved_image_ids String[]
+  approved_video_id  String?
+  approved_tts_id    String?
+  created_at         String
+  story_line         String?
+  dialogue           String?
+  anchor             String?
+  audio_path         String?
+  video_audio_path   String?
+  pipeline_model     String?
+  prompt_template_id String?
+  interaction_type   String?
+
+  @@map("shots")
+}
+
+model PromptTemplate {
+  id         String  @id
+  project_id String
+  name       String
+  formula    String
+  is_default Boolean @default(false)
+  created_at String
+
+  @@map("prompt_templates")
+}
+
+// shot_id can reference shot.id, character.id, or "base_{projectId}"
+model Generation {
+  id                String  @id
+  shot_id           String
+  type              String
+  comfyui_prompt_id String?
+  status            String
+  seed              Int?
+  image_path        String?
+  video_path        String?
+  audio_path        String?
+  voice             String?
+  error             String?
+  ref_image         String?
+  created_at        String
+  completed_at      String?
+
+  @@map("generations")
+}
+
+model Character {
+  id               String  @id
+  project_id       String
+  name             String
+  description      String
+  appearance       String
+  role             String
+  reference_prompt String
+  reference_image  String?
+  seed             Int?
+  status           String
+  created_at       String
+  pipeline_model   String?
+
+  @@map("characters")
+}
+
+model Frame {
+  id           String  @id
+  shot_id      String
+  frame_number Int
+  description  String
+  prompt       String  @default("")
+  needed       Boolean @default(true)
+  image_path   String?
+  video_path   String?
+  status       String  @default("draft")
+  ai_suggested Boolean @default(false)
+  created_at   String
+
+  @@map("frames")
+}
+
+model PromptSettings {
+  id                    String   @id
+  project_id            String   @unique
+  content_provider      Json
+  image_provider        Json
+  video_provider        Json
+  openai_api_key        String
+  anthropic_api_key     String
+  ollama_host           String
+  comfyui_host          String
+  mode                  String
+  art_style             String
+  quality_tags          String
+  negative_prompt       String
+  environment_preset    String
+  lighting_preset       String
+  camera_presets        String[]
+  color_palette         String
+  custom_prefix         String
+  custom_suffix         String
+  video_prompt_template String
+  tts_default_voice     String
+  tts_character_voices  Json
+  tts_speed             Float
+  created_at            String
+
+  @@map("prompt_settings")
+}
