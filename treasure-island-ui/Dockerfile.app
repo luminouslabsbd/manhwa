@@ -37,5 +37,5 @@ USER nextjs
 EXPOSE 3000
 ENV PORT=3000 HOSTNAME="0.0.0.0"
 
-# Run migrations then start
-CMD ["sh", "-c", "npx prisma migrate deploy && node server.js"]
+# Start server (migrations applied separately)
+CMD ["node", "server.js"]
