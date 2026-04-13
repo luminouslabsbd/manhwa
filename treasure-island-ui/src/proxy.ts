@@ -4,8 +4,24 @@ import { verifyToken } from "@/lib/session";
 const PUBLIC_ROUTES = ["/login"];
 const PUBLIC_API_PREFIXES = ["/api/auth/"];
 
+function getCdnBase(): string | null {
+  const bucket = process.env.DO_SPACES_BUCKET;
+  const region = process.env.DO_SPACES_REGION;
+  const prefix = process.env.DO_SPACES_PREFIX ?? "manhwa-studio";
+  if (!bucket || !region) return null;
+  return `https://${bucket}.${region}.digitaloceanspaces.com/${prefix}`;
+}
+
 export async function proxy(request: NextRequest) {
   const { pathname } = request.nextUrl;
+
+  // Redirect /generated/* to DO Spaces CDN at request time
+  if (pathname.startsWith("/generated/")) {
+    const cdnBase = getCdnBase();
+    if (cdnBase) {
+      return NextResponse.redirect(`${cdnBase}${pathname}`, { status: 307 });
+    }
+  }
 
   // Allow public routes
   if (PUBLIC_ROUTES.includes(pathname)) return NextResponse.next();
@@ -39,6 +55,6 @@ export async function proxy(request: NextRequest) {
 
 export const config = {
   matcher: [
-    "/((?!_next/static|_next/image|favicon.ico|favicon.svg|public/|generated/).*)",
+    "/((?!_next/static|_next/image|favicon.ico|favicon.svg|public/).*)",
   ],
 };
