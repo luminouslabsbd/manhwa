@@ -1,6 +1,8 @@
-import { load } from "@/lib/db";
+import { NextRequest } from "next/server";
+import { load, save } from "@/lib/db";
 import { prisma } from "@/lib/prisma";
 import { resolveAllVars } from "@/lib/template";
+import { randomUUID } from "crypto";
 
 export async function GET(_: Request, { params }: { params: Promise<{ id: string }> }) {
   const { id } = await params;
@@ -87,4 +89,56 @@ const result = shots.map((s) => {
     };
   });
   return Response.json(result);
+}
+
+export async function POST(req: NextRequest, { params }: { params: Promise<{ id: string }> }) {
+  const { id } = await params;
+  const db = await load();
+
+  const ep = db.episodes.find((e) => e.id === id);
+  if (!ep) return Response.json({ error: "Episode not found" }, { status: 404 });
+
+  const body = await req.json();
+  const shot_description = body.shot_description?.trim();
+  if (!shot_description) return Response.json({ error: "shot_description required" }, { status: 400 });
+
+  const maxNum = db.shots
+    .filter((s) => s.episode_id === id)
+    .reduce((m, s) => Math.max(m, s.shot_number), 0);
+
+  const shot = {
+    id: randomUUID(),
+    episode_id: id,
+    project_id: ep.project_id,
+    shot_number: maxNum + 1,
+    character: body.character?.trim() || null,
+    shot_description,
+    environment: body.environment?.trim() || "unspecified",
+    lighting: body.lighting?.trim() || "natural",
+    camera_angle: body.camera_angle?.trim() || "medium shot",
+    full_prompt: body.full_prompt?.trim() || shot_description,
+    negative_prompt: body.negative_prompt?.trim() || "ugly, blurry, low quality, distorted, text, watermark",
+    seed: null,
+    width: body.width ?? 832,
+    height: body.height ?? 1216,
+    steps: body.steps ?? 25,
+    status: "draft",
+    approved_image_id: null,
+    approved_image_ids: [],
+    approved_video_id: null,
+    approved_tts_id: null,
+    story_line: body.story_line?.trim() || null,
+    dialogue: body.dialogue?.trim() || null,
+    anchor: body.anchor?.trim() || null,
+    audio_path: null,
+    video_audio_path: null,
+    pipeline_model: body.pipeline_model?.trim() || null,
+    prompt_template_id: null,
+    interaction_type: null,
+    created_at: new Date().toISOString(),
+  };
+
+  db.shots.push(shot);
+  await save(db);
+  return Response.json(shot, { status: 201 });
 }

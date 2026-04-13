@@ -12,6 +12,7 @@ export default async function AdminLayout({ children }: { children: React.ReactN
             <p style={{ fontSize: 11, fontWeight: 700, color: "var(--muted)", textTransform: "uppercase", letterSpacing: 1, marginBottom: 8, padding: "0 10px" }}>Admin</p>
             <NavLink href="/admin">Dashboard</NavLink>
             <NavLink href="/admin/users">Users</NavLink>
+            <NavLink href="/admin/projects">Projects</NavLink>
             <hr style={{ border: "none", borderTop: "1px solid var(--border)", margin: "8px 0" }} />
             <NavLink href="/projects">← Back to Studio</NavLink>
           </nav>

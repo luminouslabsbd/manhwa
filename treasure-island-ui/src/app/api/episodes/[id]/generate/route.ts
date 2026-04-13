@@ -10,11 +10,15 @@ export async function POST(req: Request, { params }: { params: Promise<{ id: str
 
   const db = await load();
   const shots = db.shots.filter((s) => s.episode_id === id);
-  const eligible = regenerateAll
+  const allEligible = regenerateAll
     ? shots
     : shots.filter((s) => ["draft", "failed"].includes(s.status));
 
-  if (!eligible.length) return Response.json({ ok: true, queued: 0 });
+  // Only generate shots that have a character assigned
+  const skippedNoChar = allEligible.filter(s => !s.character?.trim()).length;
+  const eligible = allEligible.filter(s => s.character?.trim());
+
+  if (!eligible.length) return Response.json({ ok: true, queued: 0, skippedNoChar });
 
   const episode = db.episodes.find((e) => e.id === id);
   const project = episode ? db.projects.find((p) => p.id === episode.project_id) : null;
@@ -67,8 +71,8 @@ export async function POST(req: Request, { params }: { params: Promise<{ id: str
     if (allModelsToUse) {
       shotModels = allModelsToUse;
     } else {
-      // Single model: character's pipeline_model > project's pipeline_model > first available
-      const singleModel = char?.pipeline_model ?? project?.pipeline_model ?? models[0] ?? null;
+      // Single model: character → project → first available → env default
+      const singleModel = char?.pipeline_model ?? project?.pipeline_model ?? models[0] ?? process.env.COMFYUI_MODEL ?? null;
       if (!singleModel) continue;
       shotModels = [singleModel];
     }
@@ -94,5 +98,5 @@ export async function POST(req: Request, { params }: { params: Promise<{ id: str
     });
   }
 
-  return Response.json({ ok: true, queued, models: allModelsToUse ?? "per-shot", regenerateAll });
+  return Response.json({ ok: true, queued, skippedNoChar, models: allModelsToUse ?? "per-shot", regenerateAll });
 }

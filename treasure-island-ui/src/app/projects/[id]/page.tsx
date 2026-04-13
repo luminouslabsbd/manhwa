@@ -15,6 +15,29 @@ export default function ProjectPage() {
   const { data: project } = useSWR<Project>(`/api/projects/${id}`, fetcher);
   const { data: episodes, mutate } = useSWR<Episode[]>(`/api/projects/${id}/episodes`, fetcher, { revalidateOnFocus: false });
   const [genLoading, setGenLoading] = useState(false);
+  const [addingEp, setAddingEp] = useState(false);
+  const [epTitle, setEpTitle] = useState("");
+  const [epLoading, setEpLoading] = useState(false);
+
+  async function addEpisode(e: React.FormEvent) {
+    e.preventDefault();
+    if (!epTitle.trim()) return;
+    setEpLoading(true);
+    const res = await fetch(`/api/projects/${id}/episodes`, {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ title: epTitle.trim() }),
+    });
+    if (res.ok) {
+      setEpTitle(""); setAddingEp(false);
+      mutate();
+      toast("Episode created", "success");
+    } else {
+      const d = await res.json();
+      toast(d.error ?? "Failed", "error");
+    }
+    setEpLoading(false);
+  }
 
   async function generateAll() {
     if (!confirm("Queue ALL shots for generation? This will use GPU time.")) return;
@@ -28,10 +51,10 @@ export default function ProjectPage() {
 
   return (
     <div style={{ minHeight: "100vh", background: "var(--bg)" }}>
-      <nav style={{ background: "var(--bg2)", borderBottom: "1px solid var(--border)", padding: "12px 24px", display: "flex", alignItems: "center", gap: 16 }}>
-        <Link href="/projects" style={{ fontWeight: 800, fontSize: 18, color: "var(--accent)", textDecoration: "none", letterSpacing: -0.5 }}>◈ Manhwa Studio</Link>
+      <div style={{ background: "var(--bg2)", borderBottom: "1px solid var(--border)", padding: "10px 24px", display: "flex", alignItems: "center", gap: 10 }}>
+        <Link href="/projects" style={{ color: "var(--muted)", textDecoration: "none", fontSize: 13, fontWeight: 500 }}>Projects</Link>
         <span style={{ color: "var(--border)" }}>/</span>
-        <span style={{ color: "var(--text)", fontWeight: 600 }}>{project?.name ?? "…"}</span>
+        <span style={{ color: "var(--text)", fontWeight: 600, fontSize: 13 }}>{project?.name ?? "…"}</span>
         <div style={{ marginLeft: "auto", display: "flex", gap: 8 }}>
           <Link href={`/projects/${id}/characters`} className="btn btn-secondary btn-sm">👤 Characters</Link>
           <Link href={`/projects/${id}/settings`} className="btn btn-secondary btn-sm">⚙️ Settings</Link>
@@ -41,7 +64,7 @@ export default function ProjectPage() {
             {genLoading ? <span className="spinner" /> : "⚡"} Generate All
           </button>
         </div>
-      </nav>
+      </div>
 
       <div style={{ maxWidth: 1200, margin: "0 auto", padding: "24px" }}>
         {project && (
@@ -62,7 +85,22 @@ export default function ProjectPage() {
 
         <div style={{ display: "flex", alignItems: "center", justifyContent: "space-between", margin: "24px 0 16px" }}>
           <h2 style={{ fontSize: 20, fontWeight: 800, letterSpacing: -0.3 }}>Episodes</h2>
+          <button className="btn btn-primary btn-sm" onClick={() => { setAddingEp(true); setEpTitle(""); }}>+ Add Episode</button>
         </div>
+
+        {addingEp && (
+          <form onSubmit={addEpisode} style={{ background: "var(--bg3)", border: "1px solid var(--accent)", borderRadius: 8, padding: 16, marginBottom: 20, display: "flex", gap: 10, alignItems: "center", flexWrap: "wrap" }}>
+            <input
+              autoFocus value={epTitle} onChange={e => setEpTitle(e.target.value)}
+              placeholder="Episode title (e.g. The Storm)"
+              style={{ flex: 1, minWidth: 200, background: "var(--bg2)", border: "1px solid var(--border)", color: "var(--text)", borderRadius: 6, padding: "7px 12px", fontSize: 14 }}
+            />
+            <button type="submit" className="btn btn-primary btn-sm" disabled={epLoading || !epTitle.trim()}>
+              {epLoading ? <span className="spinner" /> : "Create"}
+            </button>
+            <button type="button" className="btn btn-secondary btn-sm" onClick={() => setAddingEp(false)}>Cancel</button>
+          </form>
+        )}
 
         {!episodes ? (
           <div style={{ textAlign: "center", padding: 40, color: "var(--muted)" }}><span className="spinner" /></div>

@@ -2,7 +2,6 @@
 import useSWR from "swr";
 import Link from "next/link";
 import { useState } from "react";
-import PodPanel from "@/components/PodPanel";
 
 const fetcher = (u: string) => { const c = new AbortController(); setTimeout(() => c.abort(), 6000); return fetch(u, { signal: c.signal }).then(r => r.json()).catch(() => []); };
 
@@ -28,17 +27,8 @@ export default function ProjectsPage() {
 
   return (
     <div style={{ minHeight: "100vh", background: "var(--bg)" }}>
-      {/* Nav */}
-      <nav style={{ background: "var(--bg2)", borderBottom: "1px solid var(--border)", padding: "12px 24px", display: "flex", alignItems: "center", gap: 16 }}>
-        <span style={{ fontWeight: 800, fontSize: 18, color: "var(--accent)", letterSpacing: -0.5 }}>◈ Manhwa Studio</span>
-        <span style={{ color: "var(--border)" }}>|</span>
-        <span style={{ color: "var(--muted)", fontSize: 13 }}>Projects</span>
-      </nav>
-
       <div style={{ maxWidth: 1200, margin: "0 auto", padding: "24px 24px" }}>
-        <PodPanel />
-
-        <div style={{ display: "flex", alignItems: "center", justifyContent: "space-between", margin: "32px 0 16px" }}>
+        <div style={{ display: "flex", alignItems: "center", justifyContent: "space-between", margin: "8px 0 20px" }}>
           <h1 style={{ fontSize: 22, fontWeight: 800 }}>Projects</h1>
           <button className="btn btn-primary" onClick={() => setCreating(true)}>+ New Project</button>
         </div>
@@ -67,20 +57,27 @@ export default function ProjectsPage() {
             <div style={{ fontSize: 16 }}>No projects yet. Create your first manhwa project.</div>
           </div>
         ) : (
-          <div style={{ display: "grid", gridTemplateColumns: "repeat(auto-fill,minmax(300px,1fr))", gap: 16 }}>
+          <div style={{ display: "grid", gridTemplateColumns: "repeat(auto-fill,minmax(320px,1fr))", gap: 16 }}>
             {projects.map(p => (
               <Link key={p.id} href={`/projects/${p.id}`} style={{ textDecoration: "none" }}>
                 <div className="card" style={{ padding: 20, cursor: "pointer", transition: "border-color .15s", borderColor: "var(--border)" }}
                   onMouseEnter={e => (e.currentTarget.style.borderColor = "var(--accent)")}
                   onMouseLeave={e => (e.currentTarget.style.borderColor = "var(--border)")}>
-                  <div style={{ fontWeight: 700, fontSize: 16, marginBottom: 8 }}>{p.name}</div>
-                  <div style={{ display: "flex", gap: 16, fontSize: 12, color: "var(--muted)" }}>
-                    <span>📺 {p.episode_count} eps</span>
-                    <span>🎬 {p.shot_count} shots</span>
-                    <span style={{ color: "var(--success)" }}>✓ {p.approved_count} approved</span>
-                    <span style={{ color: "var(--accent2)" }}>🖼 {p.generated_count} generated</span>
+                  <div style={{ fontWeight: 700, fontSize: 16, marginBottom: 16, lineHeight: 1.3, color: "var(--text)" }}>{p.name}</div>
+                  <div style={{ display: "grid", gridTemplateColumns: "1fr 1fr 1fr 1fr", gap: 8, marginBottom: 14 }}>
+                    {[
+                      { label: "EPS",       val: p.episode_count,  color: "var(--text)" },
+                      { label: "SHOTS",     val: p.shot_count,     color: "var(--text)" },
+                      { label: "APPROVED",  val: p.approved_count, color: "#4ade80" },
+                      { label: "GENERATED", val: p.generated_count,color: "#a78bfa" },
+                    ].map(s => (
+                      <div key={s.label} style={{ background: "var(--bg2)", borderRadius: 6, padding: "8px 10px", border: "1px solid var(--border)" }}>
+                        <div style={{ fontSize: 9, color: "var(--muted)", fontWeight: 700, letterSpacing: "0.08em", marginBottom: 4 }}>{s.label}</div>
+                        <div style={{ fontSize: 22, fontWeight: 800, color: s.color, lineHeight: 1 }}>{s.val}</div>
+                      </div>
+                    ))}
                   </div>
-                  <div style={{ marginTop: 8, fontSize: 11, color: "var(--muted)" }}>
+                  <div style={{ fontSize: 11, color: "var(--muted)" }}>
                     {new Date(p.created_at).toLocaleDateString()}
                   </div>
                 </div>

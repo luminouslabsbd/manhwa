@@ -912,14 +912,15 @@ type Frame = { id: string; shot_id: string; frame_number: number; description: s
 type Shot = { id: string; project_id: string; shot_number: number; character: string | null; shot_description: string; environment: string; lighting: string; camera_angle: string; full_prompt: string; negative_prompt: string; seed: number | null; width: number; height: number; steps: number; status: string; approved_image_id: string | null; approved_image_ids: string[]; approved_video_id: string | null; approved_tts_id: string | null; latest_image: string | null; latest_video: string | null; attempt_count: number; story_line: string | null; dialogue: string | null; anchor: string | null; audio_path: string | null; video_audio_path: string | null; generations?: Generation[]; frames?: Frame[]; pipeline_model: string | null; prompt_template_id?: string | null; prompt_template_formula?: string | null; prompt_template_name?: string | null; template_resolved?: Record<string, string>; };
 type PromptTemplate = { id: string; project_id: string; name: string; formula: string; is_default: boolean; created_at: string; };
 type Episode = { id: string; number: number; title: string; shot_count: number; done_count: number; };
-type Project = { id: string; name: string; base_image_path?: string | null; pipeline_model?: string | null; };
-type Char = { id: string; name: string; appearance: string; role: string; reference_image: string | null; latest_image: string | null; status: string; pipeline_model?: string | null; };
+type Project = { id: string; name: string; base_image_path?: string | null; pipeline_model?: string | null; default_model?: string | null; };
+type Char = { id: string; name: string; appearance: string; role: string; reference_image: string | null; latest_image: string | null; status: string; pipeline_model?: string | null; latest_model?: string | null; };
 
 export default function EpisodePage() {
   const { id, epId } = useParams<{ id: string; epId: string }>();
   const router = useRouter();
   const SWR_OPTS = { revalidateOnFocus: false, revalidateOnReconnect: false } as const;
   const { data: project } = useSWR<Project>(`/api/projects/${id}`, fetcher, SWR_OPTS);
+  const { data: appConfig } = useSWR<{ default_model: string | null }>("/api/config", fetcher, { revalidateOnFocus: false, revalidateOnReconnect: false });
   const { data: episodes } = useSWR<Episode[]>(`/api/projects/${id}/episodes`, fetcher, SWR_OPTS);
   const { data: chars, mutate: mutateChars } = useSWR<Char[]>(`/api/projects/${id}/characters`, fetcher, { ...SWR_OPTS, refreshInterval: 8000 });
   const { data: shots, mutate } = useSWR<Shot[]>(`/api/episodes/${epId}/shots`, fetcher, SWR_OPTS);
@@ -935,6 +936,9 @@ export default function EpisodePage() {
   const [frameMgrShotId, setFrameMgrShotId] = useState<string | null>(null);
   const [frameImageLightbox, setFrameImageLightbox] = useState<{ imagePath: string; frameNumber: number; description: string } | null>(null);
   const pollTimer = useRef<ReturnType<typeof setInterval> | null>(null);
+  const [addingShot, setAddingShot] = useState(false);
+  const [shotForm, setShotForm] = useState({ shot_description: "", character: "", environment: "", lighting: "", camera_angle: "", dialogue: "", story_line: "" });
+  const [shotLoading, setShotLoading] = useState(false);
 
   const currentEp = episodes?.find(e => e.id === epId);
   const currentIdx = episodes?.findIndex(e => e.id === epId) ?? -1;
@@ -982,7 +986,11 @@ export default function EpisodePage() {
       body: JSON.stringify({ regenerateAll }),
     });
     const data = await res.json();
-    toast(`Queued ${data.queued} shots${regenerateAll ? " (all)" : ""}`, "success");
+    const skipped = data.skippedNoChar ?? 0;
+    const msg = skipped > 0
+      ? `Queued ${data.queued} shots${regenerateAll ? " (all)" : ""} · ${skipped} skipped (no character)`
+      : `Queued ${data.queued} shots${regenerateAll ? " (all)" : ""}`;
+    toast(msg, data.queued > 0 ? "success" : "warning");
     setGenLoading(false);
     mutate();
   }
@@ -1001,14 +1009,18 @@ export default function EpisodePage() {
       body: JSON.stringify({ seed: newSeed, model, ...(hasFrames ? { generateFrames: true } : {}) }),
     });
     mutate();
-    // Aggressive early polls for fast generations (every 2s for first 20s)
-    const earlyPollTimes = [2000, 4000, 6000, 10000, 15000, 20000];
-    for (const delay of earlyPollTimes) {
-      setTimeout(async () => {
-        try { await fetch("/api/poll", { signal: AbortSignal.timeout(10000) }); } catch { /* ignore */ }
-        mutate();
-      }, delay);
-    }
+    // Poll aggressively until shot is no longer generating (max 60s)
+    let polls = 0;
+    const pollInterval = setInterval(async () => {
+      polls++;
+      try { await fetch("/api/poll", { signal: AbortSignal.timeout(10000) }); } catch { /* ignore */ }
+      mutate();
+      // Stop polling once the shot is done or after 30 attempts (~60s)
+      const current = (await fetch(`/api/shots/${shotId}`).then(r => r.json()).catch(() => null));
+      if (polls >= 30 || (current?.shot?.status && !["generating", "video_generating"].includes(current.shot.status))) {
+        clearInterval(pollInterval);
+      }
+    }, 2000);
   }
 
   async function generateSingleAllModels(shotId: string) {
@@ -1134,6 +1146,35 @@ export default function EpisodePage() {
     mutate();
   }
 
+  async function addShot(e: React.FormEvent) {
+    e.preventDefault();
+    if (!shotForm.shot_description.trim()) return;
+    setShotLoading(true);
+    const res = await fetch(`/api/episodes/${epId}/shots`, {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({
+        shot_description: shotForm.shot_description.trim(),
+        character: shotForm.character.trim() || undefined,
+        environment: shotForm.environment.trim() || undefined,
+        lighting: shotForm.lighting.trim() || undefined,
+        camera_angle: shotForm.camera_angle.trim() || undefined,
+        dialogue: shotForm.dialogue.trim() || undefined,
+        story_line: shotForm.story_line.trim() || undefined,
+      }),
+    });
+    if (res.ok) {
+      setShotForm({ shot_description: "", character: "", environment: "", lighting: "", camera_angle: "", dialogue: "", story_line: "" });
+      setAddingShot(false);
+      mutate();
+      toast("Shot created", "success");
+    } else {
+      const d = await res.json();
+      toast(d.error ?? "Failed", "error");
+    }
+    setShotLoading(false);
+  }
+
   const filtered = (shots ?? []).filter(s => filter === "all" || s.status === filter);
   const statuses = ["all", "draft", "generating", "done", "approved", "video_generating", "video_done", "failed"];
   const counts = (shots ?? []).reduce((acc, s) => { acc[s.status] = (acc[s.status] ?? 0) + 1; return acc; }, {} as Record<string, number>);
@@ -1217,6 +1258,12 @@ export default function EpisodePage() {
           </button>
           <button className="btn btn-secondary btn-sm" onClick={generateAllTTSAndVideos} disabled={ttsVidLoading}>
             {ttsVidLoading ? <span className="spinner" /> : "🎙"} TTS + Video
+          </button>
+
+          <div style={{ width: 1, height: 22, background: "var(--border)", margin: "0 2px" }} />
+
+          <button className="btn btn-primary btn-sm" onClick={() => { setAddingShot(true); setShotForm({ shot_description: "", character: "", environment: "", lighting: "", camera_angle: "", dialogue: "", story_line: "" }); }}>
+            + Add Shot
           </button>
         </div>
       </nav>
@@ -1387,6 +1434,57 @@ export default function EpisodePage() {
           </div>
         )}
 
+        {/* Add Shot inline form */}
+        {addingShot && (
+          <form onSubmit={addShot} style={{ background: "var(--bg3)", border: "1px solid var(--accent)", borderRadius: 10, padding: 16, marginBottom: 20, display: "flex", flexDirection: "column", gap: 10 }}>
+            <div style={{ fontWeight: 700, fontSize: 14, marginBottom: 2 }}>New Shot</div>
+            <div style={{ display: "flex", gap: 10, flexWrap: "wrap" }}>
+              <input
+                autoFocus required
+                value={shotForm.shot_description} onChange={e => setShotForm(f => ({ ...f, shot_description: e.target.value }))}
+                placeholder="Shot description (required)"
+                style={{ flex: "1 1 300px", background: "var(--bg2)", border: "1px solid var(--border)", color: "var(--text)", borderRadius: 6, padding: "7px 12px", fontSize: 14 }}
+              />
+              <input
+                value={shotForm.character} onChange={e => setShotForm(f => ({ ...f, character: e.target.value }))}
+                placeholder="Character (optional)"
+                style={{ flex: "1 1 160px", background: "var(--bg2)", border: "1px solid var(--border)", color: "var(--text)", borderRadius: 6, padding: "7px 12px", fontSize: 14 }}
+              />
+              <input
+                value={shotForm.environment} onChange={e => setShotForm(f => ({ ...f, environment: e.target.value }))}
+                placeholder="Environment (optional)"
+                style={{ flex: "1 1 160px", background: "var(--bg2)", border: "1px solid var(--border)", color: "var(--text)", borderRadius: 6, padding: "7px 12px", fontSize: 14 }}
+              />
+              <input
+                value={shotForm.lighting} onChange={e => setShotForm(f => ({ ...f, lighting: e.target.value }))}
+                placeholder="Lighting (optional)"
+                style={{ flex: "1 1 140px", background: "var(--bg2)", border: "1px solid var(--border)", color: "var(--text)", borderRadius: 6, padding: "7px 12px", fontSize: 14 }}
+              />
+              <input
+                value={shotForm.camera_angle} onChange={e => setShotForm(f => ({ ...f, camera_angle: e.target.value }))}
+                placeholder="Camera angle (optional)"
+                style={{ flex: "1 1 160px", background: "var(--bg2)", border: "1px solid var(--border)", color: "var(--text)", borderRadius: 6, padding: "7px 12px", fontSize: 14 }}
+              />
+              <input
+                value={shotForm.dialogue} onChange={e => setShotForm(f => ({ ...f, dialogue: e.target.value }))}
+                placeholder="Dialogue (optional)"
+                style={{ flex: "1 1 200px", background: "var(--bg2)", border: "1px solid var(--border)", color: "var(--text)", borderRadius: 6, padding: "7px 12px", fontSize: 14 }}
+              />
+              <input
+                value={shotForm.story_line} onChange={e => setShotForm(f => ({ ...f, story_line: e.target.value }))}
+                placeholder="Story line (optional)"
+                style={{ flex: "1 1 200px", background: "var(--bg2)", border: "1px solid var(--border)", color: "var(--text)", borderRadius: 6, padding: "7px 12px", fontSize: 14 }}
+              />
+            </div>
+            <div style={{ display: "flex", gap: 10 }}>
+              <button type="submit" className="btn btn-primary btn-sm" disabled={shotLoading || !shotForm.shot_description.trim()}>
+                {shotLoading ? <span className="spinner" /> : "Create Shot"}
+              </button>
+              <button type="button" className="btn btn-secondary btn-sm" onClick={() => setAddingShot(false)}>Cancel</button>
+            </div>
+          </form>
+        )}
+
         {/* Filter bar */}
         <div style={{ display: "flex", gap: 8, marginBottom: 20, flexWrap: "wrap" }}>
           {statuses.map(s => {
@@ -1433,8 +1531,15 @@ export default function EpisodePage() {
                 const ttsGens = gens.filter(g => g.type === "tts");
                 const approvedIds = shot.approved_image_ids ?? (shot.approved_image_id ? [shot.approved_image_id] : []);
                 const charData = chars?.find(c => c.name === shot.character);
+                const resolvedDefaultModel: string | null =
+                  (shot as Record<string, unknown>).pipeline_model as string | null
+                  ?? charData?.pipeline_model
+                  ?? charData?.latest_model
+                  ?? project?.pipeline_model
+                  ?? appConfig?.default_model
+                  ?? null;
                 return (
-                  <ShotCard key={shot.id} shot={shot}
+                  <ShotCard key={shot.id} shot={shot} defaultModel={resolvedDefaultModel}
                     onEdit={() => setEditing(shot)}
                     onGenerate={() => generateSingle(shot.id)}
                     onFrameClick={(fId) => {
@@ -1503,6 +1608,7 @@ export default function EpisodePage() {
             shot={editing}
             onClose={() => setEditing(null)}
             onSaved={() => { setEditing(null); mutate(); }}
+            onNavigate={(dir) => { const target = dir === "prev" ? prev : next; if (target) { setEditing(target); mutate(); } }}
             characters={chars}
             adjacentShots={{
               prev: prev ? { shot_number: prev.shot_number, full_prompt: prev.full_prompt, environment: prev.environment, lighting: prev.lighting, character: prev.character } : null,
@@ -1530,9 +1636,19 @@ export default function EpisodePage() {
           onNext={() => setLightbox(lb => lb ? { ...lb, index: (lb.index + 1) % lb.items.length } : null)}
           onJump={(i) => setLightbox(lb => lb ? { ...lb, index: i } : null)}
           onApprove={async (genId, shotId) => {
-            await fetch(`/api/shots/${shotId}/approve`, { method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify({ generation_id: genId }) });
+            const res = await fetch(`/api/shots/${shotId}/approve`, { method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify({ generation_id: genId }) });
+            const data = await res.json();
             mutate();
-            setLightbox(lb => lb ? { ...lb, items: lb.items.map(i => ({ ...i, isApproved: i.genId === genId ? !i.isApproved : i.isApproved })) } : null);
+            const approvedIds: string[] = data.approved_image_ids ?? [];
+            const lastApprovedId = approvedIds[approvedIds.length - 1] ?? null;
+            setLightbox(lb => lb ? {
+              ...lb,
+              items: lb.items.map(i => ({
+                ...i,
+                isApproved: i.shotId === shotId ? approvedIds.includes(i.genId) : i.isApproved,
+                approvedImageId: i.shotId === shotId ? lastApprovedId : i.approvedImageId,
+              })),
+            } : null);
           }}
           onDelete={async (genId) => {
             await fetch(`/api/generations/${genId}`, { method: "DELETE" });
@@ -1552,11 +1668,24 @@ export default function EpisodePage() {
           onDeleteGen={async (genId) => {
             await fetch(`/api/generations/${genId}`, { method: "DELETE" });
             mutate();
-            setLightbox(lb => lb ? { ...lb, items: lb.items.map(item => ({ ...item, videoGens: (item.videoGens ?? []).filter(g => g.id !== genId), ttsGens: (item.ttsGens ?? []).filter(g => g.id !== genId) })) } : null);
+            setLightbox(lb => lb ? {
+              ...lb,
+              items: lb.items.map(item => ({
+                ...item,
+                videoGens: (item.videoGens ?? []).filter(g => g.id !== genId),
+                ttsGens: (item.ttsGens ?? []).filter(g => g.id !== genId),
+                approvedVideoId: item.approvedVideoId === genId ? null : item.approvedVideoId,
+              })),
+            } : null);
           }}
           onRegenerate={async (shotId, model) => {
             await fetch(`/api/shots/${shotId}/generate`, { method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify({ model }) });
+            toast(`Queued generation${model ? ` (${model.split(/[-_]/)[0].slice(0,12)})` : ""}`, "success");
             mutate();
+            const earlyPolls = [2000, 4000, 6000, 10000, 15000, 20000];
+            for (const delay of earlyPolls) {
+              setTimeout(async () => { try { await fetch("/api/poll", { signal: AbortSignal.timeout(10000) }); } catch { /* ignore */ } mutate(); }, delay);
+            }
           }}
           onGenerateImage={(shotId) => { generateSingle(shotId); }}
           onGenerateTTS={async (shotId, voice) => {

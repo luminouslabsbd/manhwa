@@ -6,7 +6,7 @@ import BaseImagePanel from "@/components/BaseImagePanel";
 
 const fetcher = (u: string) => { const c = new AbortController(); setTimeout(() => c.abort(), 6000); return fetch(u, { signal: c.signal }).then(r => r.json()).catch(() => null); };
 
-type Char = { id: string; name: string; description: string; appearance: string; role: string; reference_prompt: string; reference_image: string | null; latest_image: string | null; seed: number | null; status: string; generation_count: number };
+type Char = { id: string; name: string; description: string; appearance: string; role: string; reference_prompt: string; reference_image: string | null; latest_image: string | null; seed: number | null; status: string; generation_count: number; pipeline_model?: string | null; latest_model?: string | null; shot_count?: number };
 type CharWithGenerations = Char & { generations?: { id: string; image_path: string | null; status: string }[] };
 
 export default function CharactersPage() {
@@ -17,6 +17,7 @@ export default function CharactersPage() {
   const [form, setForm] = useState({ name: "", description: "", appearance: "", role: "", reference_prompt: "" });
   const [saving, setSaving] = useState(false);
   const [genAllLoading, setGenAllLoading] = useState(false);
+  const [genShotsLoading, setGenShotsLoading] = useState<string | null>(null); // char id being generated
   const [viewMode, setViewMode] = useState<"grid" | "list">("grid");
   const pollTimer = useRef<ReturnType<typeof setInterval> | null>(null);
 
@@ -61,6 +62,19 @@ export default function CharactersPage() {
     }
     setGenAllLoading(false);
     refresh();
+  }
+
+  async function generateShots(charId: string, e: React.MouseEvent) {
+    e.stopPropagation();
+    setGenShotsLoading(charId);
+    await fetch(`/api/characters/${charId}/generate-shots`, { method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify({}) });
+    setGenShotsLoading(null);
+    refresh();
+  }
+
+  function shortModel(m: string | null | undefined): string | null {
+    if (!m) return null;
+    return m.replace(/\.[^.]+$/, "").split(/[\\/]/).pop()?.slice(0, 18) ?? m;
   }
 
   async function pollResults() {
@@ -139,6 +153,8 @@ export default function CharactersPage() {
               const thumb = c.reference_image ?? c.latest_image;
               const isGenerating = c.status === "generating";
               const statusColor = isGenerating ? "#f59e0b" : c.status === "done" ? "#22c55e" : c.status === "failed" ? "#ef4444" : "var(--border)";
+              const model = shortModel(c.pipeline_model ?? c.latest_model);
+              const isGenningShots = genShotsLoading === c.id;
               return (
                 <div
                   key={c.id}
@@ -159,13 +175,40 @@ export default function CharactersPage() {
                     ) : (
                       <div style={{ display: "flex", alignItems: "center", justifyContent: "center", height: "100%", fontSize: 40, color: "var(--muted)" }}>👤</div>
                     )}
+                    {/* Generation count badge */}
                     {completedImgs > 0 && (
                       <div style={{ position: "absolute", top: 6, right: 6, background: "rgba(0,0,0,.7)", color: "#fff", borderRadius: 4, padding: "2px 6px", fontSize: 10, fontWeight: 700 }}>{completedImgs}</div>
                     )}
+                    {/* Model badge */}
+                    {model && (
+                      <div style={{ position: "absolute", bottom: 6, left: 6, background: "rgba(0,0,0,.78)", color: "#a78bfa", borderRadius: 4, padding: "2px 7px", fontSize: 9, fontWeight: 700, fontFamily: "monospace", maxWidth: "85%", overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap" }}
+                        title={c.pipeline_model ?? c.latest_model ?? ""}>
+                        🖼 {model}
+                      </div>
+                    )}
+                    {/* Shot count badge */}
+                    {(c.shot_count ?? 0) > 0 && (
+                      <div style={{ position: "absolute", bottom: 6, right: 6, background: "rgba(0,0,0,.78)", color: "#38bdf8", borderRadius: 4, padding: "2px 6px", fontSize: 9, fontWeight: 700 }}
+                        title={`${c.shot_count} shots reference this character`}>
+                        🎬 {c.shot_count}
+                      </div>
+                    )}
                   </div>
-                  <div style={{ padding: "10px 12px" }}>
+                  <div style={{ padding: "10px 12px 8px" }}>
                     <div style={{ fontSize: 13, fontWeight: 700, marginBottom: 2 }}>{c.name}</div>
-                    {c.role && <div style={{ fontSize: 10, color: "var(--accent)", fontWeight: 600 }}>{c.role}</div>}
+                    {c.role && <div style={{ fontSize: 10, color: "var(--accent)", fontWeight: 600, marginBottom: 6 }}>{c.role}</div>}
+                    {/* Generate shots button */}
+                    {(c.shot_count ?? 0) > 0 && (
+                      <button
+                        className="btn btn-xs"
+                        style={{ width: "100%", background: "rgba(167,139,250,.15)", color: "#a78bfa", border: "1px solid rgba(167,139,250,.3)", borderRadius: 5, fontSize: 10, fontWeight: 700, padding: "4px 0", cursor: isGenningShots ? "not-allowed" : "pointer", opacity: isGenningShots ? 0.6 : 1 }}
+                        onClick={(e) => generateShots(c.id, e)}
+                        disabled={isGenningShots}
+                        title={`Generate all ${c.shot_count} shots for ${c.name} using ${model ?? "default"} model`}
+                      >
+                        {isGenningShots ? <span className="spinner" style={{ width: 10, height: 10, borderWidth: 2, display: "inline-block" }} /> : `⚡ Render ${c.shot_count} shots`}
+                      </button>
+                    )}
                   </div>
                 </div>
               );
@@ -179,6 +222,8 @@ export default function CharactersPage() {
               const thumb = c.reference_image ?? c.latest_image;
               const isGenerating = c.status === "generating";
               const statusColor = isGenerating ? "#f59e0b" : c.status === "done" ? "#22c55e" : c.status === "failed" ? "#ef4444" : "var(--border)";
+              const model = shortModel(c.pipeline_model ?? c.latest_model);
+              const isGenningShots = genShotsLoading === c.id;
               return (
                 <div
                   key={c.id}
@@ -186,7 +231,6 @@ export default function CharactersPage() {
                   style={{ padding: 0, overflow: "hidden", cursor: "pointer", display: "flex", alignItems: "stretch", border: `2px solid ${statusColor}` }}
                   onClick={() => router.push(`/projects/${id}/characters/${c.id}`)}
                 >
-                  {/* Thumb */}
                   <div style={{ width: 80, flexShrink: 0, background: "var(--bg2)", position: "relative" }}>
                     {isGenerating ? (
                       <div style={{ display: "flex", alignItems: "center", justifyContent: "center", height: "100%" }}><span className="spinner" style={{ width: 20, height: 20, borderWidth: 2 }} /></div>
@@ -196,16 +240,27 @@ export default function CharactersPage() {
                       <div style={{ display: "flex", alignItems: "center", justifyContent: "center", height: "100%", fontSize: 28, color: "var(--muted)" }}>👤</div>
                     )}
                   </div>
-                  {/* Info */}
-                  <div style={{ flex: 1, padding: "14px 16px", display: "flex", flexDirection: "column", gap: 4 }}>
+                  <div style={{ flex: 1, padding: "12px 16px", display: "flex", flexDirection: "column", gap: 3 }}>
                     <div style={{ fontSize: 15, fontWeight: 700 }}>{c.name}</div>
                     {c.role && <div style={{ fontSize: 11, color: "var(--accent)", fontWeight: 600 }}>{c.role}</div>}
-                    {c.appearance && <div style={{ fontSize: 11, color: "var(--muted)", lineHeight: 1.4, maxHeight: 32, overflow: "hidden" }}>{c.appearance}</div>}
+                    {model && (
+                      <div style={{ fontSize: 10, color: "#a78bfa", fontFamily: "monospace", fontWeight: 700 }} title={c.pipeline_model ?? c.latest_model ?? ""}>🖼 {model}</div>
+                    )}
+                    {c.appearance && <div style={{ fontSize: 11, color: "var(--muted)", lineHeight: 1.4, maxHeight: 28, overflow: "hidden" }}>{c.appearance}</div>}
                   </div>
-                  {/* Meta */}
-                  <div style={{ padding: "14px 16px", display: "flex", flexDirection: "column", alignItems: "flex-end", justifyContent: "center", gap: 6, flexShrink: 0 }}>
+                  <div style={{ padding: "12px 16px", display: "flex", flexDirection: "column", alignItems: "flex-end", justifyContent: "center", gap: 6, flexShrink: 0 }}>
                     <span style={{ fontSize: 10, color: statusColor, fontWeight: 700, textTransform: "uppercase" }}>{c.status}</span>
                     {completedImgs > 0 && <span style={{ fontSize: 10, color: "var(--muted)" }}>{completedImgs} images</span>}
+                    {(c.shot_count ?? 0) > 0 && (
+                      <button
+                        className="btn btn-xs"
+                        style={{ background: "rgba(167,139,250,.15)", color: "#a78bfa", border: "1px solid rgba(167,139,250,.3)", borderRadius: 5, fontSize: 10, fontWeight: 700, padding: "3px 8px", cursor: isGenningShots ? "not-allowed" : "pointer", whiteSpace: "nowrap" }}
+                        onClick={(e) => generateShots(c.id, e)}
+                        disabled={isGenningShots}
+                      >
+                        {isGenningShots ? <span className="spinner" style={{ width: 10, height: 10, borderWidth: 2, display: "inline-block" }} /> : `⚡ ${c.shot_count} shots`}
+                      </button>
+                    )}
                   </div>
                 </div>
               );

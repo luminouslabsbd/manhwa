@@ -147,23 +147,21 @@ export default function CharacterDetailPage() {
 
   const charDefaultModel = char.pipeline_model ?? "unknown";
   const allGens: Gen[] = char.generations ?? [];
-  const byModel = allGens.reduce((acc, g) => {
-    const m = g.model ?? charDefaultModel;
-    if (!acc[m] || g.created_at > acc[m].created_at) acc[m] = g;
-    return acc;
-  }, {} as Record<string, Gen>);
-  const modelGens = Object.entries(byModel).sort(([a], [b]) => a.localeCompare(b));
+  // All completed generations newest-first (what goes in the strip)
   const completedGens = allGens.filter(g => g.image_path).sort((a, b) => b.created_at.localeCompare(a.created_at));
+  // In-progress / failed (shown at the top of the strip)
+  const pendingGens = allGens.filter(g => !g.image_path).sort((a, b) => b.created_at.localeCompare(a.created_at));
+  // Strip = pending first, then all completed
+  const stripGens = [...pendingGens, ...completedGens];
 
-  const navigableGens = modelGens.filter(([, g]) => g.image_path);
-  const selectedNavIdx = navigableGens.findIndex(([, g]) => g.id === selectedGenId);
+  const navigableGens = completedGens; // all completed are navigable
+  const selectedNavIdx = navigableGens.findIndex(g => g.id === selectedGenId);
 
   function navTo(delta: number) {
     const next = navigableGens[selectedNavIdx + delta];
     if (!next) return;
-    const nextId = next[1].id;
+    const nextId = next.id;
     setSelectedGenId(nextId);
-    // Scroll the item into view in the left strip
     setTimeout(() => {
       itemRefs.current[nextId]?.scrollIntoView({ block: "nearest", behavior: "smooth" });
     }, 0);
@@ -236,17 +234,18 @@ export default function CharacterDetailPage() {
         {/* ── LEFT: filmstrip (fixed-height rows) ── */}
         <div style={{ width: 200, flexShrink: 0, borderRight: "1px solid var(--border)", background: "var(--bg2)", display: "flex", flexDirection: "column" }}>
           <div style={{ padding: "8px 12px", fontSize: 11, fontWeight: 700, color: "var(--muted)", textTransform: "uppercase", letterSpacing: 1, borderBottom: "1px solid var(--border)", flexShrink: 0 }}>
-            Models ({modelGens.length}){isGenerating && <span style={{ marginLeft: 6, color: "#f59e0b" }}>⏳</span>}
+            Images ({stripGens.length}){isGenerating && <span style={{ marginLeft: 6, color: "#f59e0b" }}>⏳</span>}
             {navigableGens.length > 1 && <span style={{ marginLeft: 6, color: "var(--border)", fontWeight: 400 }}>↑↓</span>}
           </div>
 
           <div ref={listRef} className="panel-scroll" style={{ flex: 1, overflowY: "scroll" }}>
-            {modelGens.map(([model, gen]) => {
+            {stripGens.map((gen) => {
+              const model = gen.model ?? charDefaultModel;
               const isRunning = !gen.image_path && gen.status !== "failed";
               const isFailed = gen.status === "failed";
               const isSel = gen.id === selectedGenId;
               const isRef = gen.image_path === char.reference_image;
-              const isClickable = !isRunning && !isFailed && !!gen.image_path;
+              const isClickable = !!gen.image_path;
               return (
                 <div
                   key={gen.id}
@@ -281,7 +280,7 @@ export default function CharacterDetailPage() {
                     <img src={gen.image_path} alt={model} style={{ width: "100%", height: "100%", objectFit: "cover", display: "block" }} />
                   ) : null}
 
-                  {/* Model badge — top left, always visible */}
+                  {/* Model badge — top left */}
                   <div style={{
                     position: "absolute", top: 0, left: 0, right: 0,
                     background: "linear-gradient(rgba(0,0,0,.75), transparent)",
@@ -318,7 +317,7 @@ export default function CharacterDetailPage() {
                 </div>
               );
             })}
-            {modelGens.length === 0 && (
+            {stripGens.length === 0 && (
               <div style={{ padding: 20, textAlign: "center", color: "var(--muted)", fontSize: 12 }}>
                 No images yet.<br />
                 <button className="btn btn-primary btn-xs" style={{ marginTop: 10 }} onClick={() => setRegenModal(true)}>⚡ Generate</button>
@@ -429,7 +428,6 @@ export default function CharacterDetailPage() {
           <div style={{ padding: "14px 16px", marginTop: "auto" }}>
             <div style={{ fontSize: 11, color: "var(--muted)", display: "flex", flexDirection: "column", gap: 4 }}>
               <div>Total images: <b>{completedGens.length}</b></div>
-              <div>Models run: <b>{modelGens.length}</b></div>
               {char.seed != null && <div>Last seed: <b>{char.seed}</b></div>}
               <div style={{ marginTop: 4 }}>
                 Status: <span style={{ fontWeight: 700, color: char.status === "done" ? "#22c55e" : char.status === "generating" ? "#f59e0b" : "var(--text)" }}>{char.status}</span>

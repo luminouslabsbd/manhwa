@@ -19,6 +19,11 @@ export async function POST(req: Request, { params }: { params: Promise<{ id: str
   const shot = await prisma.shot.findUnique({ where: { id } });
   if (!shot) return Response.json({ error: "Not found" }, { status: 404 });
 
+  // Require a character to be assigned before generating
+  if (!shot.character?.trim()) {
+    return Response.json({ error: "no_character", message: "Assign a character to this shot before generating." }, { status: 400 });
+  }
+
   const project = await prisma.project.findUnique({ where: { id: shot.project_id } });
 
   // Resolve character for this shot
@@ -26,9 +31,9 @@ export async function POST(req: Request, { params }: { params: Promise<{ id: str
     ? await prisma.character.findFirst({ where: { project_id: shot.project_id, name: { equals: shot.character, mode: "insensitive" } } })
     : null;
 
-  // Model resolution: explicit body → shot setting → character → project
-  const modelOverride: string | null =
-    body.model ?? shot.pipeline_model ?? char?.pipeline_model ?? project?.pipeline_model ?? null;
+  // Model resolution: explicit body → shot → character → project → env default
+  const modelOverride: string =
+    body.model ?? shot.pipeline_model ?? char?.pipeline_model ?? project?.pipeline_model ?? process.env.COMFYUI_MODEL ?? "default";
 
   const loras: LoraSpec[] | undefined = body.loras;
   const seed: number = body.seed ?? Math.floor(Math.random() * 999999);
@@ -131,7 +136,7 @@ export async function POST(req: Request, { params }: { params: Promise<{ id: str
       prompt_id = (await queuePrompt(wf, host)).prompt_id;
     }
 
-    const genType = modelOverride ? `image:${modelOverride}` : "image";
+    const genType = `image:${modelOverride}`;
     await prisma.generation.create({
       data: {
         id: randomUUID(), shot_id: id, type: genType,

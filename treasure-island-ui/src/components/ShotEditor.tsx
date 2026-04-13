@@ -40,10 +40,11 @@ type AdjacentShot = { shot_number: number; full_prompt: string; environment: str
 type FrameWithPrompt = { id: string; frame_number: number; description: string; prompt: string; needed: boolean; image_path: string | null; ai_suggested: boolean };
 type PendingSuggestion = { frame_number: number; description: string; prompt: string; needed: boolean };
 
-export default function ShotEditor({ shot, onClose, onSaved, characters, adjacentShots, episodeId }: {
+export default function ShotEditor({ shot, onClose, onSaved, onNavigate, characters, adjacentShots, episodeId }: {
   shot: Shot;
   onClose: () => void;
   onSaved: () => void;
+  onNavigate?: (dir: "prev" | "next") => void;
   characters?: Char[];
   adjacentShots?: { prev: AdjacentShot | null; next: AdjacentShot | null };
   episodeId?: string;
@@ -54,6 +55,18 @@ export default function ShotEditor({ shot, onClose, onSaved, characters, adjacen
   const [regenPrompt, setRegenPrompt] = useState(false);
   const [availableModels, setAvailableModels] = useState<{ checkpoints: string[]; unets: string[] }>({ checkpoints: [], unets: [] });
 
+  // Reset all form state when navigating to a different shot, then fetch fresh data
+  useEffect(() => {
+    setForm({ ...shot });
+    setTab("prompts");
+    setPendingSuggestions(null);
+    setSavedFrames([]);
+    // Fetch fresh shot data (the prop may be stale from the parent SWR cache)
+    fetch(`/api/shots/${shot.id}`).then(r => r.ok ? r.json() : null).then(d => {
+      if (d) setForm(d);
+    }).catch(() => {});
+  }, [shot.id]); // eslint-disable-line react-hooks/exhaustive-deps
+
   const { data: projectData } = useSWR(`/api/projects/${shot.project_id}`, fetcher);
   const { data: templatesData } = useSWR<PromptTemplate[]>(`/api/projects/${shot.project_id}/prompt-templates`, fetcher);
   const templates = templatesData ?? [];
@@ -63,6 +76,20 @@ export default function ShotEditor({ shot, onClose, onSaved, characters, adjacen
       setAvailableModels({ checkpoints: d.checkpoints ?? [], unets: d.unets ?? [] });
     }).catch(() => {});
   }, []);
+
+  useEffect(() => {
+    if (!onNavigate) return;
+    const handler = (e: KeyboardEvent) => {
+      if (!e.altKey) return;
+      const tag = (e.target as HTMLElement).tagName;
+      if (tag === "INPUT" || tag === "TEXTAREA" || tag === "SELECT") return;
+      if (e.key === "ArrowLeft" && adjacentShots?.prev) { e.preventDefault(); navigateTo("prev"); }
+      if (e.key === "ArrowRight" && adjacentShots?.next) { e.preventDefault(); navigateTo("next"); }
+    };
+    window.addEventListener("keydown", handler);
+    return () => window.removeEventListener("keydown", handler);
+  // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [onNavigate, adjacentShots]);
   const [suggestingFrames, setSuggestingFrames] = useState(false);
   const [pendingSuggestions, setPendingSuggestions] = useState<PendingSuggestion[] | null>(null);
   const [frameSufficient, setFrameSufficient] = useState(false);
@@ -156,6 +183,19 @@ export default function ShotEditor({ shot, onClose, onSaved, characters, adjacen
     if ((form as Record<string, unknown>).prompt_template_id) await autoFixPrompt();
     setSaving(false);
     onSaved();
+  }
+
+  async function saveQuiet() {
+    await fetch(`/api/shots/${shot.id}`, { method: "PATCH", headers: { "Content-Type": "application/json" }, body: JSON.stringify(form) });
+    if ((form as Record<string, unknown>).prompt_template_id) await autoFixPrompt();
+  }
+
+  async function navigateTo(dir: "prev" | "next") {
+    if (!onNavigate) return;
+    setSaving(true);
+    await saveQuiet();
+    setSaving(false);
+    onNavigate(dir);
   }
 
   async function generateShot() {
@@ -361,7 +401,27 @@ export default function ShotEditor({ shot, onClose, onSaved, characters, adjacen
             <span className={`badge badge-${shot.status === "video_done" ? "done" : shot.status}`} style={{ fontSize: 10 }}>{shot.status}</span>
             {shot.character && <span style={{ fontSize: 12, color: "var(--accent)", fontWeight: 600 }}>👤 {shot.character}</span>}
           </div>
-          <button onClick={onClose} style={{ background: "none", border: "none", color: "var(--muted)", fontSize: 20, cursor: "pointer" }}>✕</button>
+          <div style={{ display: "flex", alignItems: "center", gap: 8 }}>
+            {onNavigate && (
+              <div style={{ display: "flex", gap: 4 }}>
+                <button
+                  onClick={() => navigateTo("prev")}
+                  disabled={!adjacentShots?.prev || saving}
+                  title={adjacentShots?.prev ? `← Shot S${String(adjacentShots.prev.shot_number).padStart(2, "0")} (Alt+←)` : "No previous shot"}
+                  style={{ padding: "4px 10px", fontSize: 12, fontWeight: 700, borderRadius: 6, border: "1px solid var(--border)", background: "var(--bg2)", color: adjacentShots?.prev ? "var(--text)" : "var(--muted)", cursor: adjacentShots?.prev ? "pointer" : "not-allowed", opacity: adjacentShots?.prev ? 1 : 0.4 }}>
+                  ◀ Prev
+                </button>
+                <button
+                  onClick={() => navigateTo("next")}
+                  disabled={!adjacentShots?.next || saving}
+                  title={adjacentShots?.next ? `→ Shot S${String(adjacentShots.next.shot_number).padStart(2, "0")} (Alt+→)` : "No next shot"}
+                  style={{ padding: "4px 10px", fontSize: 12, fontWeight: 700, borderRadius: 6, border: "1px solid var(--border)", background: "var(--bg2)", color: adjacentShots?.next ? "var(--text)" : "var(--muted)", cursor: adjacentShots?.next ? "pointer" : "not-allowed", opacity: adjacentShots?.next ? 1 : 0.4 }}>
+                  {saving ? <span className="spinner" style={{ width: 10, height: 10, borderWidth: 2 }} /> : "Next ▶"}
+                </button>
+              </div>
+            )}
+            <button onClick={onClose} style={{ background: "none", border: "none", color: "var(--muted)", fontSize: 20, cursor: "pointer" }}>✕</button>
+          </div>
         </div>
 
         {/* ── Tabs ── */}

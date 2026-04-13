@@ -22,11 +22,30 @@ function parseFormula(formula: string): FormulaSegment[] {
 }
 
 type Generation = { id: string; type: string; status: string; image_path: string | null; video_path: string | null; created_at: string; };
+
+/** Extract short model label from a generation type string like "image:bigLust_v16.safetensors" */
+function modelFromType(type: string): string | null {
+  if (type === "video") return "Wan 2.1";
+  if (type === "image") return null; // plain image — no model embedded
+  // format: "image:modelName.ext" or "image:modelName.ext:frame:id"
+  const parts = type.split(":");
+  if (parts.length < 2) return null;
+  const raw = parts[1];
+  if (!raw) return null;
+  const name = raw.replace(/\.[^.]+$/, "").split(/[\\/]/).pop() ?? raw;
+  return name.length > 20 ? name.slice(0, 20) + "…" : name;
+}
+
+function shortModel(raw: string): string {
+  const name = raw.replace(/\.[^.]+$/, "").split(/[\\/]/).pop() ?? raw;
+  return name.length > 20 ? name.slice(0, 20) + "…" : name;
+}
 type Frame = { id: string; frame_number: number; description: string; needed: boolean; image_path: string | null; video_path: string | null; status: string; ai_suggested: boolean; };
 type Shot = { id: string; shot_number: number; character: string | null; shot_description: string; environment: string; lighting: string; status: string; approved_image_id: string | null; approved_video_id: string | null; latest_image: string | null; latest_video: string | null; attempt_count: number; full_prompt: string; story_line: string | null; dialogue: string | null; anchor: string | null; audio_path?: string | null; video_audio_path?: string | null; generations?: Generation[]; frames?: Frame[]; prompt_template_id?: string | null; prompt_template_formula?: string | null; prompt_template_name?: string | null; template_resolved?: Record<string, string>; };
 
-export default function ShotCard({ shot, onEdit, onImageClick, onGenerate, onFrameClick, onUpload }: {
+export default function ShotCard({ shot, defaultModel, onEdit, onImageClick, onGenerate, onFrameClick, onUpload }: {
   shot: Shot;
+  defaultModel?: string | null;
   onEdit: () => void;
   onImageClick?: () => void;
   onGenerate?: () => void;
@@ -44,6 +63,7 @@ const [genPending, setGenPending] = useState(false);
 const [showFullPrompt, setShowFullPrompt] = useState(false);
 useEffect(() => { if (shot.status !== "generating") setGenPending(false); }, [shot.status]);
 const isGenerating = genPending || shot.status === "generating";
+const noCharacter = !shot.character?.trim();
 const inVideoState = shot.status === "video_done" || shot.status === "video_generating";
   const showVideo = inVideoState && shot.latest_video;
   const isApproved = ["approved", "video_generating", "video_done"].includes(shot.status);
@@ -59,6 +79,23 @@ const inVideoState = shot.status === "video_done" || shot.status === "video_gene
   const hasVideos = (shot.generations ?? []).some(g => g.type === "video" && g.video_path);
   const hasTTS = !!shot.audio_path;
   const hasReview = hasImages || hasVideos || hasTTS;
+
+  const gens = shot.generations ?? [];
+
+  // ── Image model ────────────────────────────────────────────
+  // Priority: approved gen type → latest completed gen type → defaultModel → "default"
+  const approvedImgGen = shot.approved_image_id
+    ? gens.find(g => g.id === shot.approved_image_id)
+    : gens.filter(g => g.type.startsWith("image") && g.image_path).sort((a, b) => b.created_at.localeCompare(a.created_at))[0];
+  const usedImageModel = approvedImgGen ? modelFromType(approvedImgGen.type) : null;
+  const imageModel: string = usedImageModel ?? (defaultModel ? shortModel(defaultModel) : "default");
+  const imageBadgeUsed = !!approvedImgGen; // false = not yet generated
+
+  // ── Video model ────────────────────────────────────────────
+  const approvedVidGen = shot.approved_video_id
+    ? gens.find(g => g.id === shot.approved_video_id)
+    : gens.filter(g => g.type === "video" && g.video_path).sort((a, b) => b.created_at.localeCompare(a.created_at))[0];
+  const videoModel = approvedVidGen ? modelFromType(approvedVidGen.type) : null;
 
   const hasTemplate = !!shot.prompt_template_formula;
   const resolved = shot.template_resolved ?? {};
@@ -105,11 +142,27 @@ const inVideoState = shot.status === "video_done" || shot.status === "video_gene
           {shot.approved_video_id && !shot.video_audio_path && <span style={{ background: "#7c3aed", color: "#fff", borderRadius: 4, padding: "2px 6px", fontSize: 10, fontWeight: 700 }}>📹</span>}
         </div>
 
-        {!shot.latest_image && !showVideo && shot.status !== "generating" && (
-          <div style={{ position: "absolute", bottom: 8, left: 8, fontSize: 9, color: "rgba(255,255,255,.4)", background: "rgba(0,0,0,.5)", borderRadius: 4, padding: "2px 6px" }}>
-            Click to review / generate
-          </div>
-        )}
+        {/* Model badge — always visible bottom-left */}
+        <div style={{ position: "absolute", bottom: 8, left: 8, display: "flex", flexDirection: "column", gap: 2, alignItems: "flex-start" }}>
+          <span
+            title={imageBadgeUsed ? `Used model: ${imageModel}` : `Will use: ${imageModel}`}
+            style={{
+              background: "rgba(0,0,0,.75)",
+              color: imageBadgeUsed ? "#a78bfa" : "rgba(167,139,250,.5)",
+              borderRadius: 4, padding: "2px 6px", fontSize: 9, fontWeight: 700,
+              fontFamily: "monospace", letterSpacing: "0.02em",
+              maxWidth: 140, overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap",
+              border: imageBadgeUsed ? "none" : "1px dashed rgba(167,139,250,.35)",
+              backdropFilter: "blur(2px)",
+            }}>
+            {imageBadgeUsed ? "🖼" : "◌"} {imageModel}
+          </span>
+          {videoModel && (
+            <span title={`Video model: ${videoModel}`} style={{ background: "rgba(0,0,0,.75)", color: "#38bdf8", borderRadius: 4, padding: "2px 6px", fontSize: 9, fontWeight: 700, fontFamily: "monospace", letterSpacing: "0.02em", maxWidth: 140, overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap", backdropFilter: "blur(2px)" }}>
+              🎬 {videoModel}
+            </span>
+          )}
+        </div>
       </div>
 
       {/* Frame strip — shown only when frames exist */}
@@ -139,7 +192,10 @@ const inVideoState = shot.status === "video_done" || shot.status === "video_gene
 
       {/* Info */}
       <div style={{ padding: "10px 12px", flex: 1, display: "flex", flexDirection: "column", gap: 5 }}>
-        {shot.character && <div style={{ fontSize: 11, color: "var(--accent)", fontWeight: 700 }}>{shot.character}</div>}
+        {shot.character
+          ? <div style={{ fontSize: 11, color: "var(--accent)", fontWeight: 700 }}>👤 {shot.character}</div>
+          : <div style={{ fontSize: 10, color: "#f97316", fontWeight: 700, display: "flex", alignItems: "center", gap: 4 }}>⚠ No character — assign to generate</div>
+        }
         {shot.anchor && <div style={{ fontSize: 10, color: "#f59e0b", fontWeight: 600, lineHeight: 1.3, maxHeight: 24, overflow: "hidden" }}>📖 {shot.anchor}</div>}
         {shot.dialogue && <div style={{ fontSize: 10, color: "#fde68a", lineHeight: 1.3, maxHeight: 28, overflow: "hidden", fontStyle: "italic" }}>🗨 "{shot.dialogue.length > 60 ? shot.dialogue.slice(0, 60) + "…" : shot.dialogue}"</div>}
 
@@ -184,7 +240,13 @@ const inVideoState = shot.status === "video_done" || shot.status === "video_gene
         {/* Actions */}
         <div style={{ display: "flex", gap: 6, marginTop: 4 }}>
           <button className="btn btn-secondary btn-xs" style={{ flex: 1 }} onClick={e => { e.stopPropagation(); onEdit(); }}>✏ Edit</button>
-          <button className="btn btn-primary btn-xs" style={{ flex: 1, opacity: isGenerating ? 0.5 : 1, cursor: isGenerating ? "not-allowed" : "pointer" }} onClick={e => { e.stopPropagation(); if (!isGenerating) { setGenPending(true); onGenerate?.(); } }} title={isGenerating ? "Generating…" : "Generate (single model)"} disabled={isGenerating}>
+          <button
+            className="btn btn-primary btn-xs"
+            style={{ flex: 1, opacity: (isGenerating || noCharacter) ? 0.4 : 1, cursor: (isGenerating || noCharacter) ? "not-allowed" : "pointer" }}
+            onClick={e => { e.stopPropagation(); if (!isGenerating && !noCharacter) { setGenPending(true); onGenerate?.(); } }}
+            title={noCharacter ? "Assign a character first" : isGenerating ? "Generating…" : "Generate (single model)"}
+            disabled={isGenerating || noCharacter}
+          >
             {isGenerating ? <span className="spinner" style={{ width: 12, height: 12, borderWidth: 2, display: "inline-block" }} /> : "⚡ Gen"}
           </button>
           {hasReview ? (

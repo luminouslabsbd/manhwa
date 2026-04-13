@@ -1,0 +1,21 @@
+{
+  "name": "ai-studio-story-mcp",
+  "version": "1.0.0",
+  "description": "MCP server for AI Studio — create Banglish gram Bangla stories with characters, episodes, and shots",
+  "type": "module",
+  "bin": {
+    "ai-studio-story-mcp": "./dist/index.js"
+  },
+  "scripts": {
+    "build": "tsc",
+    "dev": "tsx index.ts",
+    "start": "node dist/index.js"
+  },
+  "dependencies": {
+    "@modelcontextprotocol/sdk": "^1.10.2"
+  },
+  "devDependencies": {
+    "tsx": "^4.19.2",
+    "typescript": "^5.7.3"
+  }
+}

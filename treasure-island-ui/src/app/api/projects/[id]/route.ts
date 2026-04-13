@@ -12,6 +12,7 @@ export async function GET(_: Request, { params }: { params: Promise<{ id: string
     shot_count: shots.length,
     approved_count: shots.filter((s) => s.status === "approved").length,
     video_count: shots.filter((s) => s.approved_video_id).length,
+    default_model: p.pipeline_model ?? process.env.COMFYUI_MODEL ?? null,
   });
 }
 
