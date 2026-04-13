@@ -2,6 +2,7 @@ import { getHistory, fetchImageAsBase64, uploadImage, queuePrompt, buildWan2_1_I
 import { mergeAudioVideo } from "@/lib/ffmpeg-utils";
 import { drainQueue } from "@/lib/gen-queue";
 import { prisma } from "@/lib/prisma";
+import { saveGenerated, readGenerated, generatedExists } from "@/lib/storage";
 import fs from "fs";
 import path from "path";
 
@@ -36,8 +37,8 @@ export async function GET() {
           if (shot.audio_path) {
             try {
               const audioAbsPath = path.join(process.cwd(), "public", shot.audio_path.replace(/^\//, ""));
-              if (fs.existsSync(audioAbsPath)) {
-                const buf = fs.readFileSync(audioAbsPath);
+              if (generatedExists(shot.audio_path)) {
+                const buf = readGenerated(shot.audio_path);
                 if (buf.length >= 44) {
                   const dataSize = buf.readUInt32LE(40);
                   const sampleRate = buf.readUInt32LE(24);
@@ -49,9 +50,8 @@ export async function GET() {
               }
             } catch { /* use default */ }
           }
-          const imgAbsPath = path.join(process.cwd(), "public", gen.image_path.replace(/^\//, ""));
-          if (!fs.existsSync(imgAbsPath)) continue;
-          const imgBuffer = fs.readFileSync(imgAbsPath);
+          if (!generatedExists(gen.image_path)) continue;
+          const imgBuffer = readGenerated(gen.image_path);
           const imgName = `shot_${gen.shot_id}_${gen.id.slice(0, 8)}.png`;
           const uploadData = await uploadImage(imgBuffer, imgName, host);
           let prompt_id: string;
@@ -175,11 +175,8 @@ export async function GET() {
         // ── Image outputs ──
         for (const img of ((nodeOut.images ?? []) as Array<{ filename: string; subfolder: string }>)) {
           const buf = await fetchImageAsBase64(img.filename, img.subfolder, host);
-          const dir = path.join(process.cwd(), "public", "generated", projectId);
-          fs.mkdirSync(dir, { recursive: true });
           const fname = isBaseImage ? "base.png" : `${gen.id}.png`;
-          const filePath = `/generated/${projectId}/${fname}`;
-          fs.writeFileSync(path.join(dir, fname), buf);
+          const filePath = await saveGenerated(buf, projectId, fname);
 
           await prisma.generation.update({
             where: { id: gen.id },
@@ -229,11 +226,8 @@ export async function GET() {
         // ── Video outputs ──
         for (const vid of ((nodeOut.gifs ?? []) as Array<{ filename: string; subfolder: string }>)) {
           const buf = await fetchImageAsBase64(vid.filename, vid.subfolder, host);
-          const dir = path.join(process.cwd(), "public", "generated", projectId);
-          fs.mkdirSync(dir, { recursive: true });
           const fname = `${gen.id}.mp4`;
-          const videoPath = `/generated/${projectId}/${fname}`;
-          fs.writeFileSync(path.join(dir, fname), buf);
+          const videoPath = await saveGenerated(buf, projectId, fname);
 
           await prisma.generation.update({
             where: { id: gen.id },
