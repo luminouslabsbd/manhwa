@@ -30,7 +30,8 @@ COPY --from=builder /app/prisma ./prisma
 COPY --from=builder /app/node_modules/.prisma ./node_modules/.prisma
 COPY --from=builder /app/node_modules/@prisma ./node_modules/@prisma
 
-RUN mkdir -p /app/public/generated && chown -R nextjs:nodejs /app/public/generated
+# Remove any symlink and create a real directory (volume will be mounted here at runtime)
+RUN rm -rf /app/public/generated && mkdir -p /app/public/generated && chown -R nextjs:nodejs /app/public/generated
 
 USER nextjs
 

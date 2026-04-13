@@ -46,6 +46,9 @@ Dockerfile
 *.jsonl
 .turbo
 
+# Generated files (mounted as volume at runtime)
+public/generated
+
 # Large files
 *.psd
 *.mp4
