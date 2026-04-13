@@ -40,3 +40,6 @@ yarn-error.log*
 *.tsbuildinfo
 next-env.d.ts
 public/generated/
+
+# Pod config (runtime state — not for git)
+.pod-config.json

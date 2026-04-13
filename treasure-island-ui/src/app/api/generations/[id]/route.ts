@@ -1,6 +1,5 @@
 import { NextRequest, NextResponse } from "next/server";
 import { prisma } from "@/lib/prisma";
-import { load, save } from "@/lib/db";
 import fs from "fs";
 import path from "path";
 
@@ -20,24 +19,26 @@ export async function DELETE(_req: NextRequest, { params }: { params: Promise<{ 
 
   // If this was the approved video/image/tts on the shot, clear the reference
   if (gen.shot_id) {
-    const db = await load();
-    const shot = db.shots.find(s => s.id === gen.shot_id);
+    const shot = await prisma.shot.findUnique({ where: { id: gen.shot_id } });
     if (shot) {
-      let changed = false;
       if (gen.type === "video" && shot.approved_video_id === id) {
-        shot.approved_video_id = null;
-        shot.status = "approved"; // revert to approved image state
-        changed = true;
-      } else if ((gen.type === "image" || gen.type.startsWith("image:")) && shot.approved_image_ids?.includes(id)) {
-        shot.approved_image_ids = (shot.approved_image_ids ?? []).filter(x => x !== id);
-        shot.approved_image_id = shot.approved_image_ids[shot.approved_image_ids.length - 1] ?? null;
-        if (shot.approved_image_ids.length === 0) shot.status = "done";
-        changed = true;
+        await prisma.shot.update({
+          where: { id: shot.id },
+          data: { approved_video_id: null, status: "approved" },
+        });
+      } else if ((gen.type === "image" || gen.type.startsWith("image:")) && (shot.approved_image_ids as string[] ?? []).includes(id)) {
+        const newIds = (shot.approved_image_ids as string[] ?? []).filter(x => x !== id);
+        await prisma.shot.update({
+          where: { id: shot.id },
+          data: {
+            approved_image_ids: newIds,
+            approved_image_id: newIds[newIds.length - 1] ?? null,
+            status: newIds.length === 0 ? "done" : shot.status,
+          },
+        });
       } else if (gen.type === "tts" && shot.approved_tts_id === id) {
-        shot.approved_tts_id = null;
-        changed = true;
+        await prisma.shot.update({ where: { id: shot.id }, data: { approved_tts_id: null } });
       }
-      if (changed) await save(db);
     }
   }
 

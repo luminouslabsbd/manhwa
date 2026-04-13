@@ -51,6 +51,12 @@ export async function drainQueue(): Promise<number> {
   const queueCount = await getQueueCount();
   if (queueCount === 0) return 0;
 
+  // Don't submit image jobs while video is rendering — video needs full VRAM
+  const runningVideoCount = await prisma.generation.count({
+    where: { status: "running", type: { startsWith: "video" } },
+  });
+  if (runningVideoCount > 0) return 0;
+
   // Count currently running image generations
   const runningCount = await prisma.generation.count({
     where: { status: "running", type: { startsWith: "image" } },

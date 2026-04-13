@@ -220,6 +220,30 @@ export async function getAudioDuration(audioPath: string): Promise<number> {
 }
 
 /**
+ * Trim the last N seconds from a video to remove end-frame glitches.
+ * Overwrites the file in place. No-ops if video is shorter than trimSecs * 2.
+ */
+export async function trimVideoEnd(videoPath: string, trimSecs = 0.3): Promise<void> {
+  const durationMs = await getVideoDuration(videoPath).catch(() => 0);
+  if (!durationMs || durationMs < trimSecs * 2 * 1000) return;
+  const newDuration = (durationMs / 1000) - trimSecs;
+  const tmpPath = videoPath.replace(/\.mp4$/, '_trim.mp4');
+  await new Promise<void>((resolve, reject) => {
+    const proc = spawn('ffmpeg', [
+      '-y', '-i', videoPath,
+      '-t', String(newDuration.toFixed(3)),
+      '-c', 'copy',
+      tmpPath,
+    ]);
+    proc.on('close', (code) => {
+      if (code === 0) { fs.renameSync(tmpPath, videoPath); resolve(); }
+      else { try { fs.unlinkSync(tmpPath); } catch {} reject(new Error(`ffmpeg trim exited ${code}`)); }
+    });
+    proc.on('error', reject);
+  });
+}
+
+/**
  * Convert audio to standard format (24kHz, 16-bit, stereo WAV)
  */
 export async function normalizeAudio(

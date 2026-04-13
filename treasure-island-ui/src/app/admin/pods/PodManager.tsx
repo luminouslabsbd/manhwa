@@ -1,7 +1,7 @@
 "use client";
 
 import { useState, useEffect, useRef, useCallback } from "react";
-import type { PodConfig } from "@/lib/pod-config";
+import type { PodConfig, VideoQualityPreset } from "@/lib/pod-config";
 
 type RunPodPod = {
   id: string;
@@ -174,6 +174,9 @@ export default function PodManager({ initialConfig }: { initialConfig: PodConfig
 
       {/* Idle Stop Settings */}
       <IdleSettings config={config} onUpdate={(c) => setConfig((prev) => ({ ...prev, ...c }))} />
+
+      {/* Video Quality Preset */}
+      <VideoQualitySettings config={config} onUpdate={(c) => setConfig((prev) => ({ ...prev, ...c }))} />
 
       {/* Create Pod Modal */}
       {showCreate && (
@@ -507,6 +510,73 @@ function CreatePodWizard({
             </p>
           </div>
         )}
+      </div>
+    </div>
+  );
+}
+
+// ── Video Quality Settings ────────────────────────────────────────────────────
+
+const VIDEO_PRESETS: { id: VideoQualityPreset; label: string; detail: string }[] = [
+  { id: "fast",     label: "Fast",     detail: "16fps · ~4s · 20 steps — quick preview" },
+  { id: "balanced", label: "Balanced", detail: "24fps · ~4s · 25 steps — good quality" },
+  { id: "smooth",   label: "Smooth",   detail: "24fps · ~4s · 30 steps — best quality" },
+];
+
+function VideoQualitySettings({ config, onUpdate }: { config: PodConfig; onUpdate: (c: Partial<PodConfig>) => void }) {
+  const [saving, setSaving] = useState(false);
+  const [selected, setSelected] = useState<VideoQualityPreset>(config.videoQualityPreset ?? "balanced");
+
+  const save = async () => {
+    setSaving(true);
+    try {
+      const r = await fetch("/api/admin/pods/video-preset", {
+        method: "PATCH",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ preset: selected }),
+      });
+      const d = await r.json();
+      if (d.ok) onUpdate({ videoQualityPreset: d.preset });
+    } finally {
+      setSaving(false);
+    }
+  };
+
+  return (
+    <div style={{ padding: 18, borderRadius: 10, border: "1px solid var(--border)" }}>
+      <h2 style={{ fontSize: 15, fontWeight: 600, margin: "0 0 6px" }}>Video Quality Preset</h2>
+      <p style={{ fontSize: 12, color: "var(--muted)", margin: "0 0 14px" }}>
+        Default quality used for all video generation. Higher quality = longer render time.
+      </p>
+
+      <div style={{ display: "flex", flexDirection: "column", gap: 8 }}>
+        {VIDEO_PRESETS.map((p) => (
+          <label key={p.id} style={{
+            display: "flex", alignItems: "center", gap: 12, padding: "12px 14px",
+            borderRadius: 8, border: `2px solid ${selected === p.id ? "var(--accent)" : "var(--border)"}`,
+            cursor: "pointer", background: selected === p.id ? "rgba(99,102,241,0.05)" : "transparent",
+          }}>
+            <input type="radio" name="videoPreset" value={p.id}
+              checked={selected === p.id}
+              onChange={() => setSelected(p.id)}
+              style={{ accentColor: "var(--accent)" }}
+            />
+            <div style={{ flex: 1 }}>
+              <div style={{ fontWeight: 600, fontSize: 14 }}>{p.label}</div>
+              <div style={{ fontSize: 12, color: "var(--muted)" }}>{p.detail}</div>
+            </div>
+            {selected === p.id && (
+              <span style={{ fontSize: 11, fontWeight: 700, color: "var(--accent)" }}>ACTIVE</span>
+            )}
+          </label>
+        ))}
+      </div>
+
+      <div style={{ marginTop: 14 }}>
+        <button onClick={save} disabled={saving}
+          style={{ padding: "6px 14px", borderRadius: 6, border: "none", background: "var(--accent)", color: "#fff", cursor: "pointer", fontSize: 12, fontWeight: 600 }}>
+          {saving ? "Saving..." : "Save"}
+        </button>
       </div>
     </div>
   );

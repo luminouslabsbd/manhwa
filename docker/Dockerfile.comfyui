@@ -1,0 +1,51 @@
+# ComfyUI — CPU image for local development on Apple Silicon (M1/M2/M3/M4)
+# Runs on linux/arm64 inside Docker Desktop — no GPU, uses CPU inference.
+# ~60-90s per 512×512 SDXL image. Good for dev/testing; use RunPod for production.
+FROM python:3.11-slim-bookworm
+
+# ── System deps ───────────────────────────────────────────────────────────────
+RUN apt-get update -qq && \
+    apt-get install -y -qq --no-install-recommends \
+      git wget curl ffmpeg libsndfile1 aria2 ca-certificates \
+    && rm -rf /var/lib/apt/lists/*
+
+# ── Clone ComfyUI ─────────────────────────────────────────────────────────────
+WORKDIR /app
+RUN git clone --depth 1 -q https://github.com/comfyanonymous/ComfyUI /app/ComfyUI
+
+# ── Python packages ───────────────────────────────────────────────────────────
+WORKDIR /app/ComfyUI
+
+# torch CPU build (ARM64 native on M4, no MPS inside Docker)
+RUN pip install --no-cache-dir -q \
+    torch torchvision torchaudio --index-url https://download.pytorch.org/whl/cpu
+
+# ComfyUI requirements (strip torch lines — already installed above)
+RUN grep -vE '^torch(vision|audio)?($|[>=< !])' requirements.txt > /tmp/req.txt && \
+    pip install --no-cache-dir -q -r /tmp/req.txt 2>/dev/null
+
+# Extra packages
+RUN pip install --no-cache-dir -q \
+    huggingface_hub hf_transfer \
+    av torchsde kornia spandrel \
+    accelerate imageio imageio-ffmpeg \
+    2>/dev/null
+
+# ── Custom nodes ──────────────────────────────────────────────────────────────
+WORKDIR /app/ComfyUI/custom_nodes
+RUN git clone --depth 1 -q https://github.com/Kosinkadink/ComfyUI-VideoHelperSuite && \
+    pip install --no-cache-dir -q -r ComfyUI-VideoHelperSuite/requirements.txt 2>/dev/null || true
+
+# ── Model path config ─────────────────────────────────────────────────────────
+RUN mkdir -p /models/{checkpoints,loras,vae,text_encoders,diffusion_models,clip,unet,upscale_models,clip_vision}
+
+COPY docker/extra_model_paths.yaml /app/ComfyUI/extra_model_paths.yaml
+
+# ── Entrypoint ────────────────────────────────────────────────────────────────
+COPY docker/comfyui-entrypoint.sh /entrypoint.sh
+RUN chmod +x /entrypoint.sh
+
+WORKDIR /app/ComfyUI
+EXPOSE 8188
+
+ENTRYPOINT ["/entrypoint.sh"]

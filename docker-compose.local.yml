@@ -1,0 +1,27 @@
+services:
+  comfyui:
+    build:
+      context: .
+      dockerfile: docker/Dockerfile.comfyui
+      platforms:
+        - linux/arm64
+    platform: linux/arm64
+    image: ai-studio-comfyui:local
+    container_name: ai-studio-comfyui
+    ports:
+      - "8188:8188"
+    volumes:
+      # Bind mount — models live on HOST disk, survive container crashes/rebuilds
+      - ./models:/models
+      # Output images on host
+      - ./comfyui-output:/app/ComfyUI/output
+    environment:
+      HF_TOKEN: ${HF_TOKEN:-}
+      CIVITAI_TOKEN: ${CIVITAI_TOKEN:-}
+    restart: unless-stopped
+    healthcheck:
+      test: ["CMD", "curl", "-sf", "http://localhost:8188/system_stats"]
+      interval: 30s
+      timeout: 10s
+      retries: 5
+      start_period: 60s

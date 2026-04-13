@@ -1,5 +1,7 @@
+import { resolveComfyUIHost } from "@/lib/pod-config";
+
 // ── Config ──────────────────────────────────────────────────────────
-const DEFAULT_CHECKPOINT = "bigLust_v16.safetensors";
+const DEFAULT_CHECKPOINT = "flux1-schnell-fp8.safetensors";
 const NEG_PROMPT = "ugly, blurry, low quality, distorted, text, watermark, deformed, bad anatomy, nsfw";
 
 // Model-specific CFG: higher = stricter prompt following
@@ -76,7 +78,7 @@ export async function resolveHost(): Promise<string> {
 }
 
 export function getHost() {
-  return process.env.COMFYUI_HOST || "http://localhost:8188";
+  return resolveComfyUIHost();
 }
 
 /** Ensures model name has a file extension (.safetensors assumed if missing) */
@@ -483,6 +485,39 @@ export function buildI2VWorkflow(
 }
 
 // ══════════════════════════════════════════════════════════════════════
+// ── Video quality presets ─────────────────────────────────────────────
+export type VideoQualityPreset = "fast" | "balanced" | "smooth";
+
+export const VIDEO_QUALITY_PRESETS: Record<VideoQualityPreset, {
+  label: string;
+  description: string;
+  fps: number;
+  maxFrames: number;
+  steps: number;
+}> = {
+  fast: {
+    label: "Fast",
+    description: "16fps · 4s · 20 steps — quick preview",
+    fps: 16,
+    maxFrames: 65,
+    steps: 20,
+  },
+  balanced: {
+    label: "Balanced",
+    description: "24fps · 4s · 25 steps — good quality",
+    fps: 24,
+    maxFrames: 97,
+    steps: 25,
+  },
+  smooth: {
+    label: "Smooth",
+    description: "24fps · 4s · 30 steps — best quality",
+    fps: 24,
+    maxFrames: 97,
+    steps: 30,
+  },
+};
+
 // WORKFLOW 4b: Wan 2.1 I2V 14B — true image-to-video
 // Requires wan2.1-i2v-14b-480p-fp8.safetensors in diffusion_models/
 // ══════════════════════════════════════════════════════════════════════
@@ -491,9 +526,12 @@ export function buildWan2_1_I2VWorkflow_14B(
   imageName: string,
   seed: number,
   durationFrames: number = 81,
+  preset: VideoQualityPreset = "balanced",
 ) {
   const prefix = `studio/wan2i2v_${Date.now()}`;
-  const frames = Math.max(5, Math.round((durationFrames - 1) / 4) * 4 + 1);
+  const { fps: FPS, maxFrames, steps } = VIDEO_QUALITY_PRESETS[preset];
+  const clampedFrames = Math.min(durationFrames, maxFrames);
+  const frames = Math.max(5, Math.round((clampedFrames - 1) / 4) * 4 + 1);
 
   return {
     "1": {
@@ -523,7 +561,7 @@ export function buildWan2_1_I2VWorkflow_14B(
         positive_prompt: prompt,
         negative_prompt: "static image, no motion, blurry, low quality, worst quality",
         t5: ["2", 0],
-        force_offload: true,
+        force_offload: false,
         model_to_offload: ["1", 0],
       },
     },
@@ -534,7 +572,7 @@ export function buildWan2_1_I2VWorkflow_14B(
         noise_aug_strength: 0.0,
         start_latent_strength: 1.0,
         end_latent_strength: 0.0,
-        force_offload: true,
+        force_offload: false,
         vae: ["3", 0],
         start_image: ["4", 0],
       },
@@ -543,7 +581,7 @@ export function buildWan2_1_I2VWorkflow_14B(
       class_type: "WanVideoSampler",
       inputs: {
         model: ["1", 0], image_embeds: ["6", 0], text_embeds: ["5", 0],
-        steps: 20, cfg: 6.0, shift: 5.0, seed, force_offload: true,
+        steps, cfg: 6.0, shift: 5.0, seed, force_offload: false,
         scheduler: "unipc", riflex_freq_index: 0,
       },
     },
@@ -553,7 +591,7 @@ export function buildWan2_1_I2VWorkflow_14B(
     },
     "9": {
       class_type: "VHS_VideoCombine",
-      inputs: { images: ["8", 0], frame_rate: 16, loop_count: 0, format: "video/h264-mp4", pingpong: false, save_output: true, filename_prefix: prefix },
+      inputs: { images: ["8", 0], frame_rate: FPS, loop_count: 0, format: "video/h264-mp4", pingpong: false, save_output: true, filename_prefix: prefix },
     },
   };
 }
@@ -571,8 +609,9 @@ export function buildWan2_1_I2VWorkflow(
   _modelOverride?: string | null
 ) {
   const prefix = `studio/wan2v_${Date.now()}`;
-  // Clamp frames: WanVideo requires (N-1) divisible by 4, min 5
-  const frames = Math.max(5, Math.round((durationFrames - 1) / 4) * 4 + 1);
+  // Cap at 97 frames (~6s) and clamp to WanVideo divisibility rule
+  const clampedFrames = Math.min(durationFrames, 97);
+  const frames = Math.max(5, Math.round((clampedFrames - 1) / 4) * 4 + 1);
 
   return {
     // 1. Load Wan 2.1 T2V 1.3B model from diffusion_models folder
@@ -611,7 +650,7 @@ export function buildWan2_1_I2VWorkflow(
         positive_prompt: prompt,
         negative_prompt: "static image, no motion, blurry, low quality, worst quality",
         t5: ["2", 0],
-        force_offload: true,
+        force_offload: false,
         model_to_offload: ["1", 0],
       },
     },
@@ -631,11 +670,11 @@ export function buildWan2_1_I2VWorkflow(
         model: ["1", 0],
         image_embeds: ["5", 0],
         text_embeds: ["4", 0],
-        steps: 30,
+        steps: 15,
         cfg: 6.0,
         shift: 5.0,
         seed,
-        force_offload: true,
+        force_offload: false,
         scheduler: "unipc",
         riflex_freq_index: 0,
       },

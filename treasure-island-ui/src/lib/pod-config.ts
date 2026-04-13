@@ -3,6 +3,8 @@ import path from "path";
 
 const CONFIG_PATH = path.join(process.cwd(), ".pod-config.json");
 
+export type VideoQualityPreset = "fast" | "balanced" | "smooth";
+
 export interface PodConfig {
   activePodId?: string;
   comfyuiHost?: string;
@@ -12,6 +14,7 @@ export interface PodConfig {
   idleStopMinutes: number;
   lastActivityAt?: string; // ISO timestamp — last time queue had jobs
   lastIdleCheckAt?: string;
+  videoQualityPreset?: VideoQualityPreset;
 }
 
 const DEFAULTS: PodConfig = {

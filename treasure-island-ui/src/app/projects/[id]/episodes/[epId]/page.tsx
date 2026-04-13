@@ -28,7 +28,7 @@ function Lightbox({ items, index, onClose, onPrev, onNext, onJump, onApprove, on
   onApprove: (genId: string, shotId: string) => void;
   onDelete: (genId: string) => void;
   onApproveVideo: (genId: string, shotId: string) => void;
-  onGenerateVideo: (shotId: string) => void;
+  onGenerateVideo: (shotId: string, preset: string) => void;
   onDeleteGen: (genId: string) => void;
   onRegenerate: (shotId: string, model: string | undefined) => void;
   onGenerateAllModels: (shotId: string) => void;
@@ -470,13 +470,13 @@ function Lightbox({ items, index, onClose, onPrev, onNext, onJump, onApprove, on
                   disabled={!item.approvedImageId || videoGenerating}
                   onClick={async () => {
                     setVideoGenerating(true);
-                    await onGenerateVideo(item.shotId);
+                    await onGenerateVideo(item.shotId, "");
                     setVideoGenerating(false);
                   }}
                   style={{ width: "100%", padding: "10px 0", fontSize: 12, fontWeight: 700, borderRadius: 9, border: "none", display: "flex", alignItems: "center", justifyContent: "center", gap: 7, background: !item.approvedImageId ? "rgba(255,255,255,.08)" : videoGenerating ? "rgba(124,58,237,.5)" : "#7c3aed", color: !item.approvedImageId ? "rgba(255,255,255,.3)" : "#fff", cursor: !item.approvedImageId || videoGenerating ? "not-allowed" : "pointer", transition: "background .2s" }}>
                   {videoGenerating
                     ? <><span className="spinner" style={{ width: 14, height: 14, borderWidth: 2, borderColor: "#fff transparent transparent transparent" }} /> Queuing render…</>
-                    : !item.approvedImageId ? "Approve image first" : "🎬 Generate / Regen Video"}
+                    : !item.approvedImageId ? "Approve image first" : "🎬 Generate Video"}
                 </button>
                 {selectedVideo && selectedVideo.video_path && selectedVideo.status !== "running" && (
                   <>
@@ -1002,11 +1002,10 @@ export default function EpisodePage() {
       ?? charData?.pipeline_model
       ?? project?.pipeline_model
       ?? undefined;
-    const hasFrames = (shot?.frames ?? []).some((f: { needed: boolean }) => f.needed);
     await fetch(`/api/shots/${shotId}/generate`, {
       method: "POST",
       headers: { "Content-Type": "application/json" },
-      body: JSON.stringify({ seed: newSeed, model, ...(hasFrames ? { generateFrames: true } : {}) }),
+      body: JSON.stringify({ seed: newSeed, model }),
     });
     mutate();
     // Poll aggressively until shot is no longer generating (max 60s)
@@ -1033,10 +1032,11 @@ export default function EpisodePage() {
     mutate();
   }
 
-  async function generateVideo(shotId: string) {
-    const res = await fetch(`/api/shots/${shotId}/generate-video`, { method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify({}) });
+  async function generateVideo(shotId: string, preset = "balanced") {
+    const res = await fetch(`/api/shots/${shotId}/generate-video`, { method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify({ preset }) });
     const d = await res.json();
     if (!res.ok) { toast(`Video error: ${d.error}`, "error"); }
+    else if (d.skipped) { toast("Already generating — wait for current render to finish", "warning"); }
     else if (d.queued === 0 && d.errors?.length) { toast(`Video failed: ${d.errors[0]}`, "error"); }
     mutate();
   }
@@ -1660,10 +1660,8 @@ export default function EpisodePage() {
             mutate();
             setLightbox(lb => lb ? { ...lb, items: lb.items.map(i => ({ ...i, approvedVideoId: i.shotId === shotId ? genId : i.approvedVideoId })) } : null);
           }}
-          onGenerateVideo={async (shotId) => {
-            const res = await fetch(`/api/shots/${shotId}/generate-video`, { method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify({}) });
-            if (!res.ok) { const d = await res.json(); toast(`Video error: ${d.error}`, "error"); }
-            mutate();
+          onGenerateVideo={async (shotId, preset) => {
+            await generateVideo(shotId, preset);
           }}
           onDeleteGen={async (genId) => {
             await fetch(`/api/generations/${genId}`, { method: "DELETE" });

@@ -2,3 +2,8 @@
 .claude/
 *.env.local
 *.env
+
+# Local ComfyUI Docker
+comfyui-output/
+models/
+.pod-config.json
