@@ -1,5 +1,6 @@
 import * as fs from "fs";
 import * as path from "path";
+import { resolveTtsHost } from "./pod-config";
 
 export interface TTSResult {
   audio_path: string;
@@ -13,7 +14,7 @@ export interface TTSOptions {
 }
 
 function getTTSHost(): string {
-  return (process.env.TTS_HOST ?? "http://localhost:5000").replace(/\/$/, "");
+  return resolveTtsHost().replace(/\/$/, "");
 }
 
 /**

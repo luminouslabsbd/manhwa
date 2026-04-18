@@ -382,15 +382,25 @@ function CreatePodWizard({
   const [error, setError] = useState<string | null>(null);
   const [setAsHost, setSetAsHost] = useState(true);
 
-  // Default GPU options if API returned nothing
+  // Default GPU options if API returned nothing (cheapest first)
   const defaultGpus: GpuType[] = [
+    { id: "NVIDIA GeForce RTX 3080", displayName: "RTX 3080 10GB", memoryInGb: 10, communityCloud: true, communityPrice: 0.17 },
+    { id: "NVIDIA GeForce RTX 3080 Ti", displayName: "RTX 3080 Ti 12GB", memoryInGb: 12, communityCloud: true, communityPrice: 0.22 },
+    { id: "NVIDIA RTX A4000", displayName: "RTX A4000 16GB", memoryInGb: 16, communityCloud: true, communityPrice: 0.20 },
+    { id: "NVIDIA GeForce RTX 4080", displayName: "RTX 4080 16GB", memoryInGb: 16, communityCloud: true, communityPrice: 0.39 },
+    { id: "NVIDIA RTX A5000", displayName: "RTX A5000 24GB", memoryInGb: 24, communityCloud: true, communityPrice: 0.36 },
+    { id: "NVIDIA GeForce RTX 3090", displayName: "RTX 3090 24GB", memoryInGb: 24, communityCloud: true, communityPrice: 0.49 },
+    { id: "NVIDIA RTX 4090", displayName: "RTX 4090 24GB", memoryInGb: 24, communityCloud: true, communityPrice: 0.69 },
+    { id: "NVIDIA RTX A6000", displayName: "RTX A6000 48GB", memoryInGb: 48, communityCloud: true, communityPrice: 0.79 },
+    { id: "NVIDIA L40", displayName: "L40 48GB", memoryInGb: 48, communityCloud: true, communityPrice: 0.99 },
     { id: "NVIDIA A100 80GB PCIe", displayName: "A100 80GB PCIe", memoryInGb: 80, communityCloud: true, communityPrice: 1.19 },
     { id: "NVIDIA A100-SXM4-80GB", displayName: "A100 80GB SXM", memoryInGb: 80, communityCloud: true, communityPrice: 2.19 },
-    { id: "NVIDIA RTX 4090", displayName: "RTX 4090 24GB", memoryInGb: 24, communityCloud: true, communityPrice: 0.69 },
-    { id: "NVIDIA GeForce RTX 3090", displayName: "RTX 3090 24GB", memoryInGb: 24, communityCloud: true, communityPrice: 0.49 },
   ];
   const options = gpuTypes.length > 0
-    ? gpuTypes.filter((g) => g.memoryInGb >= 24).slice(0, 8)
+    ? [...gpuTypes]
+        .filter((g) => g.memoryInGb >= 10 && g.communityPrice && g.communityPrice > 0)
+        .sort((a, b) => (a.communityPrice ?? 0) - (b.communityPrice ?? 0))
+        .slice(0, 14)
     : defaultGpus;
 
   const createPod = async () => {
@@ -403,19 +413,26 @@ function CreatePodWizard({
         headers: { "Content-Type": "application/json" },
         body: JSON.stringify({ gpuTypeId: selectedGpu.id }),
       });
-      const d = await r.json();
-      if (!r.ok || d.error) throw new Error(d.error || "Create failed");
+      const text = await r.text();
+      let d: { error?: string; pod?: { id: string } } = {};
+      try {
+        d = text ? JSON.parse(text) : {};
+      } catch {
+        throw new Error(text?.slice(0, 300) || `HTTP ${r.status}`);
+      }
+      if (!r.ok || d.error) throw new Error(d.error || `HTTP ${r.status}`);
       const podId = d.pod?.id;
+      if (!podId) throw new Error("Pod created but no id returned");
       setCreatedId(podId);
       setStep("done");
 
       // Optionally set as active host immediately
-      if (setAsHost && podId) {
+      if (setAsHost) {
         await fetch(`/api/admin/pods/${podId}/set-host`, { method: "POST" });
       }
       onCreated(podId);
     } catch (e) {
-      setError(String(e));
+      setError(e instanceof Error ? e.message : String(e));
       setStep("select");
     }
   };
@@ -427,6 +444,7 @@ function CreatePodWizard({
     }}>
       <div style={{
         background: "var(--bg)", borderRadius: 16, padding: 28, width: "100%", maxWidth: 520,
+        maxHeight: "90vh", overflowY: "auto",
         boxShadow: "0 25px 50px rgba(0,0,0,0.3)",
       }}>
         {/* Header */}

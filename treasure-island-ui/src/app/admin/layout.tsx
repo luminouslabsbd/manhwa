@@ -14,6 +14,7 @@ export default async function AdminLayout({ children }: { children: React.ReactN
             <NavLink href="/admin/users">Users</NavLink>
             <NavLink href="/admin/projects">Projects</NavLink>
             <NavLink href="/admin/pods">Pods</NavLink>
+            <NavLink href="/admin/settings">Settings</NavLink>
             <hr style={{ border: "none", borderTop: "1px solid var(--border)", margin: "8px 0" }} />
             <NavLink href="/projects">← Back to Studio</NavLink>
           </nav>
