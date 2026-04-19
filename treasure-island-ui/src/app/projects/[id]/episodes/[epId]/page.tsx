@@ -4,6 +4,7 @@ import { useState, useEffect, useRef } from "react";
 import { useParams, useRouter } from "next/navigation";
 import Link from "next/link";
 import RegenModal, { type RegenOptions } from "@/components/RegenModal";
+import BulkDeleteModal from "@/components/BulkDeleteModal";
 import { toast } from "@/lib/toast";
 import ShotCard from "@/components/ShotCard";
 import ShotEditor from "@/components/ShotEditor";
@@ -43,7 +44,7 @@ const VIDEO_EFFECTS: Array<{ id: VideoEffectId; label: string; emoji: string; ta
   { id: "shake",     label: "Shake",      emoji: "💥", tagline: "Handheld jitter" },
 ];
 
-function Lightbox({ items, index, onClose, onPrev, onNext, onJump, onApprove, onDelete, onApproveVideo, onGenerateVideo, onRenderVideoEffect, onDeleteGen, onRegenerate, onGenerateAllModels, onUploadImage, onBulkDelete, onGenerateImage, onGenerateTTS }: {
+function Lightbox({ items, index, onClose, onPrev, onNext, onJump, onApprove, onDelete, onApproveVideo, onGenerateVideo, onRenderVideoEffect, onDeleteGen, onRegenerate, onGenerateAllModels, onUploadImage, onBulkDelete, onBulkDeleteRefresh, onGenerateImage, onGenerateTTS, onPrevShot, onNextShot, prevShotLabel, nextShotLabel }: {
   items: LightboxItem[]; index: number;
   onClose: () => void; onPrev: () => void; onNext: () => void; onJump: (i: number) => void;
   onApprove: (genId: string, shotId: string) => void;
@@ -56,12 +57,40 @@ function Lightbox({ items, index, onClose, onPrev, onNext, onJump, onApprove, on
   onGenerateAllModels: (shotId: string) => void;
   onUploadImage: (shotId: string, file: File) => Promise<void>;
   onBulkDelete: (shotId: string) => Promise<void>;
+  onBulkDeleteRefresh: (deletedIds: string[]) => void;
   onGenerateImage: (shotId: string) => void;
   onGenerateTTS: (shotId: string, voice: string) => Promise<{ audio_path: string } | null>;
+  onPrevShot?: () => void;
+  onNextShot?: () => void;
+  prevShotLabel?: string | null;
+  nextShotLabel?: string | null;
 }) {
   const item = items[index];
   const [activeTab, setActiveTab] = useState<"images" | "video" | "tts" | "log">("images");
   const [selectedVideoIdx, setSelectedVideoIdx] = useState(0);
+  // Multi-select state for bulk delete on Images / Video tabs
+  const [selectedGenIds, setSelectedGenIds] = useState<Set<string>>(new Set());
+  const [deletingSelected, setDeletingSelected] = useState(false);
+  function toggleSelect(genId: string) {
+    setSelectedGenIds(prev => {
+      const next = new Set(prev);
+      next.has(genId) ? next.delete(genId) : next.add(genId);
+      return next;
+    });
+  }
+  // Clear selection whenever the tab or shot changes
+  useEffect(() => { setSelectedGenIds(new Set()); }, [activeTab, item.shotId]);
+  async function deleteSelected(label: string) {
+    if (!selectedGenIds.size) return;
+    if (!confirm(`Delete ${selectedGenIds.size} ${label}? This cannot be undone.`)) return;
+    setDeletingSelected(true);
+    const ids = [...selectedGenIds];
+    const results = await Promise.allSettled(ids.map(gid => fetch(`/api/generations/${gid}`, { method: "DELETE" }).then(r => r.ok ? gid : null)));
+    const actuallyDeleted = results.flatMap(r => r.status === "fulfilled" && r.value ? [r.value] : []);
+    setSelectedGenIds(new Set());
+    setDeletingSelected(false);
+    onBulkDeleteRefresh(actuallyDeleted);
+  }
   const [frameFilter, setFrameFilter] = useState<string | null>(null); // null = all
   const thumbRefs = useRef<(HTMLButtonElement | null)[]>([]);
   const [ttsVoice, setTtsVoice] = useState("default");
@@ -83,6 +112,17 @@ function Lightbox({ items, index, onClose, onPrev, onNext, onJump, onApprove, on
     const modelParts = parts.slice(1, modelEnd);
     const model = modelParts.length > 0 ? modelParts.join(":") : null;
     return { model, frameId };
+  }
+
+  /** Map a Generation.type value for a video row to a human-readable model label + colour. */
+  function formatVideoModel(type: string): { label: string; short: string; color: string } {
+    if (type === "video:ltx2_distilled")                       return { label: "LTX-Video 2 Distilled", short: "LTX-2d", color: "#10b981" };
+    if (type === "video:ltx2" || type.startsWith("video:ltx")) return { label: "LTX-Video 2", short: "LTX-2", color: "#8b5cf6" };
+    if (type === "video:t2v_fallback")                         return { label: "Wan 2.1 T2V",  short: "Wan T2V", color: "#f59e0b" };
+    if (type === "video:i2v_fallback")                         return { label: "SDXL img2img", short: "SDXL",    color: "#64748b" };
+    if (type.startsWith("video:effect:"))                      return { label: `Effect: ${type.slice("video:effect:".length)}`, short: "FX", color: "#ec4899" };
+    // Legacy / default — Wan 2.1 I2V 14B
+    return { label: "Wan 2.1 I2V 14B", short: "Wan 2.1", color: "#0ea5e9" };
   }
 
   useEffect(() => {
@@ -146,9 +186,44 @@ function Lightbox({ items, index, onClose, onPrev, onNext, onJump, onApprove, on
           })}
         </div>
 
-        {/* Close */}
-        <button onClick={onClose} style={{ background: "rgba(255,255,255,.08)", border: "none", color: "#fff", borderRadius: 8, width: 34, height: 34, fontSize: 17, cursor: "pointer", display: "flex", alignItems: "center", justifyContent: "center", flexShrink: 0 }}>✕</button>
+        {/* Prev / Next shot + Close */}
+        <div style={{ display: "flex", gap: 6, flexShrink: 0, alignItems: "center" }}>
+          <button
+            onClick={() => onPrevShot?.()}
+            disabled={!onPrevShot}
+            title={prevShotLabel ? `Previous shot — ${prevShotLabel}` : "No previous shot"}
+            style={{ background: "rgba(96,165,250,.15)", border: "1px solid rgba(96,165,250,.35)", color: onPrevShot ? "#60a5fa" : "rgba(255,255,255,.25)", borderRadius: 8, padding: "0 10px", height: 34, fontSize: 12, fontWeight: 700, cursor: onPrevShot ? "pointer" : "not-allowed", display: "flex", alignItems: "center", gap: 4 }}>
+            ◀ Shot
+          </button>
+          <button
+            onClick={() => onNextShot?.()}
+            disabled={!onNextShot}
+            title={nextShotLabel ? `Next shot — ${nextShotLabel}` : "No next shot"}
+            style={{ background: "rgba(96,165,250,.15)", border: "1px solid rgba(96,165,250,.35)", color: onNextShot ? "#60a5fa" : "rgba(255,255,255,.25)", borderRadius: 8, padding: "0 10px", height: 34, fontSize: 12, fontWeight: 700, cursor: onNextShot ? "pointer" : "not-allowed", display: "flex", alignItems: "center", gap: 4 }}>
+            Shot ▶
+          </button>
+          <button onClick={onClose} style={{ background: "rgba(255,255,255,.08)", border: "none", color: "#fff", borderRadius: 8, width: 34, height: 34, fontSize: 17, cursor: "pointer", display: "flex", alignItems: "center", justifyContent: "center" }}>✕</button>
+        </div>
       </div>
+
+      {/* ── Selection action bar (visible when one or more thumbs are selected in Images or Video tab) ── */}
+      {selectedGenIds.size > 0 && (activeTab === "images" || activeTab === "video") && (
+        <div style={{ flexShrink: 0, display: "flex", alignItems: "center", justifyContent: "space-between", padding: "6px 16px", background: "rgba(239,68,68,.12)", borderBottom: "1px solid rgba(239,68,68,.3)" }}>
+          <div style={{ fontSize: 12, fontWeight: 700, color: "#fca5a5" }}>
+            {selectedGenIds.size} selected
+          </div>
+          <div style={{ display: "flex", gap: 8 }}>
+            <button onClick={() => setSelectedGenIds(new Set())} disabled={deletingSelected}
+              style={{ padding: "5px 12px", fontSize: 11, fontWeight: 700, borderRadius: 6, border: "1px solid rgba(255,255,255,.2)", background: "transparent", color: "rgba(255,255,255,.7)", cursor: "pointer" }}>
+              Clear
+            </button>
+            <button onClick={() => deleteSelected(activeTab === "images" ? `image${selectedGenIds.size === 1 ? "" : "s"}` : `video${selectedGenIds.size === 1 ? "" : "s"}`)} disabled={deletingSelected}
+              style={{ padding: "5px 14px", fontSize: 11, fontWeight: 700, borderRadius: 6, border: "none", background: "#ef4444", color: "#fff", cursor: deletingSelected ? "default" : "pointer", display: "flex", alignItems: "center", gap: 6 }}>
+              {deletingSelected ? <span className="spinner" style={{ width: 11, height: 11, borderWidth: 1.5 }} /> : "🗑"} Delete {activeTab === "images" ? "Images" : "Videos"}
+            </button>
+          </div>
+        </div>
+      )}
 
       {/* ── Body ── */}
       <div style={{ flex: 1, display: "flex", overflow: "hidden" }}>
@@ -231,15 +306,21 @@ function Lightbox({ items, index, onClose, onPrev, onNext, onJump, onApprove, on
                           const thumbGen = imageGens.find(g => g.id === it.genId);
                           const thumbModel = (thumbGen?.model ?? "").replace(/\.(safetensors|ckpt|pt)$/i,"").split(/[-_]/)[0].slice(0,11);
                           const isActive = i === index;
+                          const isSelected = selectedGenIds.has(it.genId);
                           return (
                             <button key={it.genId} ref={el => { thumbRefs.current[i] = el; }} onClick={() => onJump(i)} style={{
                               flexShrink: 0, width: "100%", aspectRatio: "16/9", borderRadius: 5, overflow: "hidden", padding: 0, cursor: "pointer",
-                              border: isActive ? "2px solid #60a5fa" : it.isApproved ? "2px solid #22c55e" : "2px solid rgba(255,255,255,.1)",
-                              boxShadow: isActive ? "0 0 0 2px rgba(96,165,250,.3)" : "none",
-                              opacity: isActive ? 1 : 0.6, transition: "all .15s",
+                              border: isSelected ? "2px solid #ef4444" : isActive ? "2px solid #60a5fa" : it.isApproved ? "2px solid #22c55e" : "2px solid rgba(255,255,255,.1)",
+                              boxShadow: isSelected ? "0 0 0 2px rgba(239,68,68,.4)" : isActive ? "0 0 0 2px rgba(96,165,250,.3)" : "none",
+                              opacity: isActive || isSelected ? 1 : 0.6, transition: "all .15s",
                               background: "rgba(255,255,255,.06)", position: "relative",
                             }} title={thumbGen?.model ?? `Image ${i + 1}`}>
                               <img src={it.imagePath} alt="" style={{ width: "100%", height: "100%", objectFit: "cover", display: "block" }} />
+                              {/* Selection checkbox (click stops propagation so it doesn't navigate) */}
+                              <span onClick={e => { e.stopPropagation(); toggleSelect(it.genId); }}
+                                style={{ position: "absolute", top: 2, left: 2, width: 16, height: 16, borderRadius: 4, background: isSelected ? "#ef4444" : "rgba(0,0,0,.65)", border: `1.5px solid ${isSelected ? "#fff" : "rgba(255,255,255,.5)"}`, display: "flex", alignItems: "center", justifyContent: "center", fontSize: 10, color: "#fff", fontWeight: 900, cursor: "pointer" }}>
+                                {isSelected ? "✓" : ""}
+                              </span>
                               {it.isApproved && <div style={{ position: "absolute", top: 2, right: 2, width: 11, height: 11, background: "#22c55e", borderRadius: "50%", display: "flex", alignItems: "center", justifyContent: "center", fontSize: 7, color: "#fff", fontWeight: 900 }}>✓</div>}
                               <div style={{ position: "absolute", bottom: 0, left: 0, right: 0, background: "rgba(0,0,0,.7)", fontSize: 8, color: "rgba(255,255,255,.7)", textAlign: "center", padding: "2px 2px", fontWeight: 600 }}>{thumbModel || (i + 1)}</div>
                             </button>
@@ -426,19 +507,29 @@ function Lightbox({ items, index, onClose, onPrev, onNext, onJump, onApprove, on
                   const isApproved = g.id === item.approvedVideoId;
                   const isRunning = g.status === "running" || g.status === "video_generating";
                   const isFailed = g.status === "failed";
+                  const isSelected = selectedGenIds.has(g.id);
+                  const modelInfo = formatVideoModel(g.type);
                   return (
-                    <button key={g.id} onClick={() => setSelectedVideoIdx(i)} title={isFailed ? (g.error ?? "Generation failed") : undefined} style={{
+                    <button key={g.id} onClick={() => setSelectedVideoIdx(i)} title={isFailed ? (g.error ?? "Generation failed") : `${modelInfo.label} · V${i + 1}`} style={{
                       flexShrink: 0, width: "100%", aspectRatio: "16/9", borderRadius: 6, overflow: "hidden", padding: 0, cursor: "pointer",
-                      border: isSel ? "2px solid #a78bfa" : isApproved ? "2px solid #7c3aed" : isFailed ? "2px solid rgba(239,68,68,.55)" : "2px solid rgba(255,255,255,.1)",
-                      boxShadow: isSel ? "0 0 0 2px rgba(167,139,250,.3)" : "none",
-                      opacity: isSel ? 1 : 0.55, transition: "all .15s", background: "#000", position: "relative",
+                      border: isSelected ? "2px solid #ef4444" : isSel ? "2px solid #a78bfa" : isApproved ? "2px solid #7c3aed" : isFailed ? "2px solid rgba(239,68,68,.55)" : "2px solid rgba(255,255,255,.1)",
+                      boxShadow: isSelected ? "0 0 0 2px rgba(239,68,68,.4)" : isSel ? "0 0 0 2px rgba(167,139,250,.3)" : "none",
+                      opacity: isSel || isSelected ? 1 : 0.55, transition: "all .15s", background: "#000", position: "relative",
                     }}>
                       {isRunning
                         ? <div style={{ width: "100%", height: "100%", display: "flex", alignItems: "center", justifyContent: "center", background: "rgba(124,58,237,.15)" }}><span className="spinner" style={{ width: 16, height: 16, borderWidth: 2, borderColor: "#7c3aed transparent transparent transparent" }} /></div>
                         : g.video_path
                           ? <video src={g.video_path} style={{ width: "100%", height: "100%", objectFit: "cover", display: "block" }} muted />
                           : <div style={{ width: "100%", height: "100%", display: "flex", alignItems: "center", justifyContent: "center", color: "#f87171", fontSize: 16, background: isFailed ? "rgba(239,68,68,.12)" : "transparent" }}>{isFailed ? "⚠" : "✗"}</div>}
+                      {/* Selection checkbox */}
+                      <span onClick={e => { e.stopPropagation(); toggleSelect(g.id); }}
+                        style={{ position: "absolute", bottom: 16, left: 3, width: 16, height: 16, borderRadius: 4, background: isSelected ? "#ef4444" : "rgba(0,0,0,.65)", border: `1.5px solid ${isSelected ? "#fff" : "rgba(255,255,255,.5)"}`, display: "flex", alignItems: "center", justifyContent: "center", fontSize: 10, color: "#fff", fontWeight: 900, cursor: "pointer" }}>
+                        {isSelected ? "✓" : ""}
+                      </span>
                       {isApproved && <div style={{ position: "absolute", top: 2, right: 2, fontSize: 9, background: "#7c3aed", color: "#fff", borderRadius: 3, padding: "1px 4px", fontWeight: 700 }}>✓</div>}
+                      {!isRunning && !isFailed && (
+                        <div style={{ position: "absolute", top: 2, left: 2, fontSize: 8, background: modelInfo.color, color: "#fff", borderRadius: 3, padding: "1px 4px", fontWeight: 700, letterSpacing: .3 }}>{modelInfo.short}</div>
+                      )}
                       <div style={{ position: "absolute", bottom: 0, left: 0, right: 0, background: isFailed ? "rgba(127,29,29,.85)" : "rgba(0,0,0,.65)", fontSize: 9, color: isFailed ? "#fecaca" : "rgba(255,255,255,.7)", textAlign: "center", padding: "2px 0", fontWeight: 600 }}>{isRunning ? "⏳" : isFailed ? "Failed" : g.type.startsWith("video:effect:") ? g.type.slice("video:effect:".length) : `V${i + 1}`}</div>
                     </button>
                   );
@@ -476,12 +567,19 @@ function Lightbox({ items, index, onClose, onPrev, onNext, onJump, onApprove, on
             {/* Right: story + actions */}
             <div style={{ width: 240, flexShrink: 0, borderLeft: "1px solid rgba(255,255,255,.08)", display: "flex", flexDirection: "column", background: "rgba(255,255,255,.02)" }}>
               <div style={{ flex: 1, overflowY: "auto", padding: "14px" }}>
-                {selectedVideo && (
-                  <div style={{ marginBottom: 14, padding: "8px 10px", background: "rgba(167,139,250,.08)", borderRadius: 8, border: "1px solid rgba(167,139,250,.2)" }}>
-                    <div style={{ fontSize: 11, fontWeight: 700, color: "#a78bfa" }}>V{selectedVideoIdx + 1} of {videoGens.length}</div>
-                    {selectedVideo.id === item.approvedVideoId && <div style={{ fontSize: 11, color: "#7c3aed", fontWeight: 700, marginTop: 3 }}>📹 Final video</div>}
-                  </div>
-                )}
+                {selectedVideo && (() => {
+                  const mi = formatVideoModel(selectedVideo.type);
+                  return (
+                    <div style={{ marginBottom: 14, padding: "10px 12px", background: "rgba(167,139,250,.08)", borderRadius: 8, border: "1px solid rgba(167,139,250,.2)" }}>
+                      <div style={{ display: "flex", alignItems: "center", justifyContent: "space-between", marginBottom: 6 }}>
+                        <div style={{ fontSize: 11, fontWeight: 700, color: "#a78bfa" }}>V{selectedVideoIdx + 1} of {videoGens.length}</div>
+                        <span style={{ fontSize: 9, fontWeight: 700, color: "#fff", background: mi.color, borderRadius: 4, padding: "2px 7px", letterSpacing: .3 }}>{mi.label}</span>
+                      </div>
+                      <div style={{ fontSize: 10, color: "rgba(255,255,255,.45)", fontFamily: "monospace" }}>{selectedVideo.type}</div>
+                      {selectedVideo.id === item.approvedVideoId && <div style={{ fontSize: 11, color: "#7c3aed", fontWeight: 700, marginTop: 6 }}>📹 Final video</div>}
+                    </div>
+                  );
+                })()}
                 {item.storyLine && (
                   <div style={{ marginBottom: 12 }}>
                     <div style={{ fontSize: 10, fontWeight: 700, color: "rgba(255,255,255,.35)", textTransform: "uppercase", letterSpacing: 1, marginBottom: 6 }}>Story</div>
@@ -1168,6 +1266,7 @@ export default function EpisodePage() {
 
   // ── Regen modal ──
   const [regenModal, setRegenModal] = useState(false);
+  const [bulkDeleteModal, setBulkDeleteModal] = useState(false);
 
   async function runRegen(opts: RegenOptions) {
     setRegenModal(false);
@@ -1289,6 +1388,55 @@ export default function EpisodePage() {
   const statuses = ["all", "draft", "generating", "done", "approved", "video_generating", "video_done", "failed"];
   const counts = (shots ?? []).reduce((acc, s) => { acc[s.status] = (acc[s.status] ?? 0) + 1; return acc; }, {} as Record<string, number>);
 
+  // Open the review lightbox for a given shot (shared by card click + next/prev shot navigation).
+  function openLightboxForShot(shotId: string) {
+    const shot = (shots ?? []).find(s => s.id === shotId);
+    if (!shot) return;
+    const gens = shot.generations ?? [];
+    const imageGens = gens.filter((g: Generation) => g.type === "image" || g.type.startsWith("image:"));
+    const videoGens = gens.filter((g: Generation) => g.type === "video" || g.type.startsWith("video:"));
+    const ttsGens = gens.filter((g: Generation) => g.type === "tts");
+    const approvedIds = shot.approved_image_ids ?? (shot.approved_image_id ? [shot.approved_image_id] : []);
+    const charData = chars?.find(c => c.name === shot.character);
+    const shotPipelineModel = (shot as Record<string, unknown>)?.pipeline_model as string | null ?? charData?.pipeline_model ?? null;
+    const lbImages = imageGens.filter((g: Generation) => g.image_path);
+    const sharedProps = {
+      shotNumber: shot.shot_number,
+      storyLine: shot.story_line, dialogue: shot.dialogue, anchor: shot.anchor,
+      charName: shot.character,
+      charRefImage: charData?.latest_image ?? charData?.reference_image ?? null,
+      videoGens, ttsGens, imageGens,
+      frames: shot.frames ?? [],
+      fullPrompt: shot.full_prompt,
+      approvedVideoId: shot.approved_video_id,
+      approvedTtsId: shot.approved_tts_id,
+      approvedImageId: shot.approved_image_id,
+      shotPipelineModel,
+    };
+    const lbItems: LightboxItem[] = lbImages.map((g: Generation) => ({
+      imagePath: g.image_path!,
+      genId: g.id,
+      shotId: shot.id,
+      isApproved: approvedIds.includes(g.id),
+      model: (g as Record<string, unknown>).model as string | undefined,
+      ...sharedProps,
+    }));
+    const emptyPlaceholder: LightboxItem = {
+      imagePath: "", genId: "", shotId: shot.id,
+      isApproved: false,
+      ...sharedProps,
+    };
+    const items = lbItems.length ? lbItems : [emptyPlaceholder];
+    const startIdx = lbItems.findIndex(i => approvedIds.includes(i.genId));
+    setLightbox({ items, index: startIdx >= 0 ? startIdx : items.length - 1 });
+  }
+
+  // Derive prev/next shot for lightbox navigation (based on the visible, filtered list).
+  const lbShotId = lightbox?.items[0]?.shotId ?? null;
+  const lbShotIdx = lbShotId ? filtered.findIndex(s => s.id === lbShotId) : -1;
+  const prevShot = lbShotIdx > 0 ? filtered[lbShotIdx - 1] : null;
+  const nextShot = lbShotIdx >= 0 && lbShotIdx < filtered.length - 1 ? filtered[lbShotIdx + 1] : null;
+
 
   // Pipeline progress stats
   const total = shots?.length ?? 0;
@@ -1358,6 +1506,10 @@ export default function EpisodePage() {
           </button>
           <button className="btn btn-secondary btn-sm" onClick={approveAll} disabled={approveLoading}>
             {approveLoading ? <span className="spinner" /> : "✓"} Approve All
+          </button>
+          <button className="btn btn-sm" onClick={() => setBulkDeleteModal(true)} disabled={genLoading} title="Bulk delete images, videos, or TTS across this episode"
+            style={{ background: "rgba(239,68,68,.12)", color: "#ef4444", border: "1px solid rgba(239,68,68,.4)", borderRadius: 6, fontWeight: 700, fontSize: 12, padding: "4px 10px", cursor: "pointer" }}>
+            🗑 Bulk Delete
           </button>
 
           <div style={{ width: 1, height: 22, background: "var(--border)", margin: "0 2px" }} />
@@ -1671,40 +1823,7 @@ export default function EpisodePage() {
                       await fetch(`/api/shots/${shot.id}/upload`, { method: "POST", body: fd });
                       mutate();
                     }}
-                    onImageClick={() => {
-                      const lbImages = imageGens.filter(g => g.image_path);
-                      const shotPipelineModel = (shot as Record<string,unknown>)?.pipeline_model as string | null ?? charData?.pipeline_model ?? null;
-                      const sharedProps = {
-                        shotNumber: shot.shot_number,
-                        storyLine: shot.story_line, dialogue: shot.dialogue, anchor: shot.anchor,
-                        charName: shot.character,
-                        charRefImage: charData?.latest_image ?? charData?.reference_image ?? null,
-                        videoGens, ttsGens, imageGens,
-                        frames: shot.frames ?? [],
-                        fullPrompt: shot.full_prompt,
-                        approvedVideoId: shot.approved_video_id,
-                        approvedTtsId: shot.approved_tts_id,
-                        approvedImageId: shot.approved_image_id,
-                        shotPipelineModel,
-                      };
-                      const lbItems: LightboxItem[] = lbImages.map(g => ({
-                        imagePath: g.image_path!,
-                        genId: g.id,
-                        shotId: shot.id,
-                        isApproved: approvedIds.includes(g.id),
-                        model: (g as Record<string, unknown>).model as string | undefined,
-                        ...sharedProps,
-                      }));
-                      // Always open lightbox — empty items shows "no images yet" with generate option
-                      const emptyPlaceholder: LightboxItem = {
-                        imagePath: "", genId: "", shotId: shot.id,
-                        isApproved: false,
-                        ...sharedProps,
-                      };
-                      const items = lbItems.length ? lbItems : [emptyPlaceholder];
-                      const startIdx = lbItems.findIndex(i => approvedIds.includes(i.genId));
-                      setLightbox({ items, index: startIdx >= 0 ? startIdx : items.length - 1 });
-                    }}
+                    onImageClick={() => openLightboxForShot(shot.id)}
                   />
                 );
               })}
@@ -1750,6 +1869,10 @@ export default function EpisodePage() {
           onPrev={() => setLightbox(lb => lb ? { ...lb, index: (lb.index - 1 + lb.items.length) % lb.items.length } : null)}
           onNext={() => setLightbox(lb => lb ? { ...lb, index: (lb.index + 1) % lb.items.length } : null)}
           onJump={(i) => setLightbox(lb => lb ? { ...lb, index: i } : null)}
+          onPrevShot={prevShot ? () => openLightboxForShot(prevShot.id) : undefined}
+          onNextShot={nextShot ? () => openLightboxForShot(nextShot.id) : undefined}
+          prevShotLabel={prevShot ? `S${String(prevShot.shot_number).padStart(2, "0")}` : null}
+          nextShotLabel={nextShot ? `S${String(nextShot.shot_number).padStart(2, "0")}` : null}
           onApprove={async (genId, shotId) => {
             const res = await fetch(`/api/shots/${shotId}/approve`, { method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify({ generation_id: genId }) });
             const data = await res.json();
@@ -1771,9 +1894,13 @@ export default function EpisodePage() {
             setLightbox(lb => lb ? { ...lb, items: lb.items.map(item => ({ ...item, imageGens: (item.imageGens ?? []).filter(g => g.id !== genId) })) } : null);
           }}
           onApproveVideo={async (genId, shotId) => {
-            await fetch(`/api/shots/${shotId}/approve`, { method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify({ generation_id: genId }) });
+            const res = await fetch(`/api/shots/${shotId}/approve`, { method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify({ generation_id: genId }) });
+            const d = await res.json().catch(() => ({}));
+            if (!res.ok) { toast(d.error ?? "Set as final failed", "error"); return; }
+            const newApproved: string | null = "approved_video_id" in d ? d.approved_video_id : genId;
+            toast(newApproved ? "📹 Set as final" : "Removed final", "success");
             mutate();
-            setLightbox(lb => lb ? { ...lb, items: lb.items.map(i => ({ ...i, approvedVideoId: i.shotId === shotId ? genId : i.approvedVideoId })) } : null);
+            setLightbox(lb => lb ? { ...lb, items: lb.items.map(i => ({ ...i, approvedVideoId: i.shotId === shotId ? newApproved : i.approvedVideoId })) } : null);
           }}
           onGenerateVideo={async (shotId, preset) => {
             await generateVideo(shotId, preset);
@@ -1846,6 +1973,22 @@ export default function EpisodePage() {
             await fetch(`/api/shots/${shotId}/generations`, { method: "DELETE" });
             mutate();
           }}
+          onBulkDeleteRefresh={(deletedIds) => {
+            mutate();
+            if (deletedIds.length > 0) {
+              const del = new Set(deletedIds);
+              setLightbox(lb => lb ? {
+                ...lb,
+                items: lb.items.map(it => ({
+                  ...it,
+                  imageGens: (it.imageGens ?? []).filter(g => !del.has(g.id)),
+                  videoGens: (it.videoGens ?? []).filter(g => !del.has(g.id)),
+                  // If the currently-displayed image was deleted, clear its path so the thumb disappears
+                  imagePath: del.has(it.genId) ? "" : it.imagePath,
+                })).filter(it => it.imagePath !== "" || (it.imageGens ?? []).length > 0 || (it.videoGens ?? []).length > 0 || (it.ttsGens ?? []).length > 0),
+              } : null);
+            }
+          }}
         />
       )}
 
@@ -1856,6 +1999,16 @@ export default function EpisodePage() {
           subtitle={`${(shots ?? []).length} shots in this episode`}
           onConfirm={runRegen}
           onClose={() => setRegenModal(false)}
+        />
+      )}
+
+      {/* ── Bulk Delete Modal ── */}
+      {bulkDeleteModal && (
+        <BulkDeleteModal
+          episodeId={epId}
+          episodeLabel={`${(shots ?? []).length} shots`}
+          onClose={() => setBulkDeleteModal(false)}
+          onDeleted={(count) => { toast(`Deleted ${count} generation${count === 1 ? "" : "s"}`, "success"); mutate(); }}
         />
       )}
 

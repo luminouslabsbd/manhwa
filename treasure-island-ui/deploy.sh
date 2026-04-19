@@ -60,7 +60,8 @@ ssh "$SERVER" "
   ln -sf /home/forge/studio.luminousdemo.com/.env.local .env.local
   sed -i 's|\"6379:6379\"|\"6380:6379\"|' docker-compose.yml
   sed -i 's|\"3000:3000\"|\"3002:3000\"|' docker-compose.yml
-  sed -i 's|./public/generated:/app/public/generated|/home/forge/studio.luminousdemo.com/shared/public/generated:/app/public/generated|' docker-compose.yml
+  # Anchor to ' ./public/...' so the dot isn't a regex wildcard matching into an already-patched path.
+  sed -i 's| \./public/generated:/app/public/generated| /home/forge/studio.luminousdemo.com/shared/public/generated:/app/public/generated|' docker-compose.yml
   docker compose up -d app
   sleep 5
   docker compose ps

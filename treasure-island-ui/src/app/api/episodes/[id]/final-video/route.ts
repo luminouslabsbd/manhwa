@@ -5,6 +5,7 @@ import {
   getVideoDuration,
   getAudioDuration,
   imageToVideo,
+  muxVideoWithAudio,
   type TimelineClip,
   type ClipEffect,
   type ClipTransition,
@@ -33,7 +34,10 @@ type Shot = {
 
 type ClipInput = {
   shot_id?: string;
+  // "shot_video_with_audio" kept for backwards-compat (older clients or saved
+  // requests) — server treats it as source=shot_video, tts=true.
   source?: "shot_video" | "shot_video_with_audio" | "shot_image" | "custom";
+  tts?: boolean;               // mix the shot's TTS track; ignored if unavailable
   custom_video_url?: string;   // used when source = "custom"
   duration_ms?: number;        // optional override
   effect?: ClipEffect;
@@ -62,15 +66,29 @@ export async function GET(_req: Request, { params }: { params: Promise<{ id: str
     .sort((a, b) => a.shot_number - b.shot_number);
 
   const shotSummaries = await Promise.all(shots.map(async (s) => {
+    const isVideoType = (g: { type: string }) => g.type === "video" || g.type.startsWith("video:");
     const approvedVideoGen = s.approved_video_id
       ? db.generations.find((g) => g.id === s.approved_video_id && g.status === "completed" && g.video_path)
       : null;
+    // Fall back to the latest completed video generation so the timeline can offer
+    // "Video only" even when the user hasn't explicitly tagged one as final.
+    const latestVideoGen = approvedVideoGen ?? [...db.generations]
+      .filter((g) => g.shot_id === s.id && isVideoType(g) && g.status === "completed" && g.video_path)
+      .sort((a, b) => (a.created_at ?? "").localeCompare(b.created_at ?? ""))
+      .pop() ?? null;
     const approvedImageGen = s.approved_image_id
       ? db.generations.find((g) => g.id === s.approved_image_id && g.status === "completed" && g.image_path)
       : null;
+    // Mirror the video fallback: if nothing is approved, use the latest generated
+    // image so the timeline can still offer "Image + TTS" / "Image only".
+    const isImageType = (g: { type: string }) => g.type === "image" || g.type.startsWith("image:");
+    const latestImageGen = approvedImageGen ?? [...db.generations]
+      .filter((g) => g.shot_id === s.id && isImageType(g) && g.status === "completed" && g.image_path)
+      .sort((a, b) => (a.created_at ?? "").localeCompare(b.created_at ?? ""))
+      .pop() ?? null;
 
-    const videoPath = approvedVideoGen?.video_path ?? null;
-    const imagePath = approvedImageGen?.image_path ?? null;
+    const videoPath = latestVideoGen?.video_path ?? null;
+    const imagePath = latestImageGen?.image_path ?? null;
     const mergedVideoPath = s.video_audio_path ?? null;
     const audioPath = s.audio_path ?? null;
 
@@ -160,37 +178,72 @@ export async function POST(req: Request, { params }: { params: Promise<{ id: str
   // Still-image-only shots are converted to a short mp4 here so renderTimeline
   // only ever sees video inputs.
   const resolved: TimelineClip[] = [];
+  const warnings: string[] = [];
   try {
     for (let i = 0; i < body.clips.length; i++) {
       const c = body.clips[i];
+
+      // Normalize legacy source: "shot_video_with_audio" → video source + TTS on.
+      let sourceKind: "shot_video" | "shot_image" | "custom" | undefined = c.source === "shot_video_with_audio" ? "shot_video" : c.source;
+      let wantsTTS = c.source === "shot_video_with_audio" ? true : (c.tts !== false);
+
       let src: string | null = null;
       let isImage = false;
+      // When raw video + TTS is requested but no pre-merged file exists, we hold
+      // the raw audio remote here and mux them in the local-resolve step.
+      let needsMux: { audioRemote: string } | null = null;
 
-      if (c.source === "custom" && c.custom_video_url) {
+      if (sourceKind === "custom" && c.custom_video_url) {
         src = c.custom_video_url;
+        wantsTTS = false; // custom clips never mix TTS
       } else if (c.shot_id) {
         const shot = shotsById.get(c.shot_id);
         if (!shot) return Response.json({ error: `Shot ${c.shot_id} not found in this episode` }, { status: 400 });
 
-        const videoGen = shot.approved_video_id
+        const isVideoType = (x: { type: string }) => x.type === "video" || x.type.startsWith("video:");
+        const approvedVideoGen = shot.approved_video_id
           ? db.generations.find((x) => x.id === shot.approved_video_id && x.status === "completed")
           : null;
-        const imageGen = shot.approved_image_id
+        const videoGen = approvedVideoGen ?? [...db.generations]
+          .filter((x) => x.shot_id === shot.id && isVideoType(x) && x.status === "completed" && x.video_path)
+          .sort((a, b) => (a.created_at ?? "").localeCompare(b.created_at ?? ""))
+          .pop() ?? null;
+        const isImageType = (x: { type: string }) => x.type === "image" || x.type.startsWith("image:");
+        const approvedImageGen = shot.approved_image_id
           ? db.generations.find((x) => x.id === shot.approved_image_id && x.status === "completed")
           : null;
+        const imageGen = approvedImageGen ?? [...db.generations]
+          .filter((x) => x.shot_id === shot.id && isImageType(x) && x.status === "completed" && x.image_path)
+          .sort((a, b) => (a.created_at ?? "").localeCompare(b.created_at ?? ""))
+          .pop() ?? null;
 
-        if (c.source === "shot_video_with_audio" && shot.video_audio_path) {
-          src = shot.video_audio_path;
-        } else if (c.source === "shot_video" && videoGen?.video_path) {
-          src = videoGen.video_path;
-        } else if (c.source === "shot_image" && imageGen?.image_path) {
+        // If neither was requested explicitly, auto-pick what's available.
+        if (!sourceKind) sourceKind = videoGen ? "shot_video" : "shot_image";
+
+        const ttsAvailable = !!shot.audio_path;
+        const mixTTS = wantsTTS && ttsAvailable;
+
+        if (sourceKind === "shot_video" && videoGen?.video_path) {
+          if (mixTTS && shot.video_audio_path) {
+            src = shot.video_audio_path;
+          } else if (mixTTS && shot.audio_path) {
+            src = videoGen.video_path;
+            needsMux = { audioRemote: shot.audio_path };
+          } else {
+            src = videoGen.video_path;
+          }
+        } else if (sourceKind === "shot_image" && imageGen?.image_path) {
           src = imageGen.image_path;
           isImage = true;
+          wantsTTS = mixTTS; // imageToVideo path consults this
         } else {
-          // Auto-pick best available source.
-          if (shot.video_audio_path) src = shot.video_audio_path;
-          else if (videoGen?.video_path) src = videoGen.video_path;
-          else if (imageGen?.image_path) { src = imageGen.image_path; isImage = true; }
+          // Fallback: pick whichever source exists on the shot.
+          if (mixTTS && shot.video_audio_path) src = shot.video_audio_path;
+          else if (mixTTS && videoGen?.video_path && shot.audio_path) {
+            src = videoGen.video_path;
+            needsMux = { audioRemote: shot.audio_path };
+          } else if (videoGen?.video_path) src = videoGen.video_path;
+          else if (imageGen?.image_path) { src = imageGen.image_path; isImage = true; wantsTTS = mixTTS; }
         }
       }
 
@@ -206,12 +259,33 @@ export async function POST(req: Request, { params }: { params: Promise<{ id: str
       }
 
       let videoPath = localSrc;
+      if (needsMux) {
+        let audioLocal: string | null = null;
+        try {
+          audioLocal = await ensureLocalFile(needsMux.audioRemote);
+        } catch (err) {
+          const msg = err instanceof Error ? err.message : "audio missing";
+          warnings.push(`Clip ${i}: TTS unavailable (${msg}) — rendering silent`);
+        }
+        if (audioLocal) {
+          const tmpOut = path.join(tempDir, `mux_${i}.mp4`);
+          await muxVideoWithAudio(localSrc, audioLocal, tmpOut);
+          tempFiles.push(tmpOut);
+          videoPath = tmpOut;
+        }
+      }
+
       if (isImage) {
-        // Pair with TTS audio if the shot has one; otherwise silent.
+        // Pair with TTS audio only if the user asked for it and the shot has one.
         const shot = c.shot_id ? shotsById.get(c.shot_id) : null;
         let audioLocal: string | null = null;
-        if (shot?.audio_path) {
-          try { audioLocal = await ensureLocalFile(shot.audio_path); } catch { audioLocal = null; }
+        if (wantsTTS && shot?.audio_path) {
+          try { audioLocal = await ensureLocalFile(shot.audio_path); }
+          catch (err) {
+            const msg = err instanceof Error ? err.message : "audio missing";
+            warnings.push(`Clip ${i}: TTS unavailable (${msg}) — rendering silent`);
+            audioLocal = null;
+          }
         }
         const tmpOut = path.join(tempDir, `img_${i}.mp4`);
         await imageToVideo(localSrc, audioLocal, tmpOut, {
@@ -304,5 +378,5 @@ export async function POST(req: Request, { params }: { params: Promise<{ id: str
     },
   });
 
-  return Response.json({ ok: true, generation: gen, video_path: relative, duration_ms: durationMs });
+  return Response.json({ ok: true, generation: gen, video_path: relative, duration_ms: durationMs, warnings: warnings.length > 0 ? warnings : undefined });
 }

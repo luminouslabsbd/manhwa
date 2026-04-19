@@ -38,11 +38,22 @@ export async function GET(_: Request, { params }: { params: Promise<{ id: string
     }
   } catch { /* template table may not exist yet */ }
 
+  // Load locations — used to resolve [location] var in templates
+  let locationMap: Record<string, { name: string; description: string; reference_image: string | null }> = {};
+  try {
+    if (projectId) {
+      const locs = await prisma.location.findMany({ where: { project_id: projectId } });
+      locationMap = Object.fromEntries(locs.map(l => [l.id, { name: l.name, description: l.description, reference_image: l.reference_image }]));
+    }
+  } catch { /* locations table may not exist on older DBs */ }
+
 const result = shots.map((s) => {
     const gens = db.generations.filter((g) => g.shot_id === s.id);
     const imageGens = gens.filter((g) => g.type === "image" || g.type.startsWith("image:"));
     const latestImg = imageGens.filter((g) => g.status === "completed").pop();
-    const latestVid = gens.filter((g) => g.type === "video" && g.status === "completed").pop();
+    const videoGens = gens.filter((g) => (g.type === "video" || g.type.startsWith("video:")) && g.status === "completed");
+    const approvedVid = s.approved_video_id ? videoGens.find((g) => g.id === s.approved_video_id) : null;
+    const latestVid = approvedVid ?? videoGens[videoGens.length - 1];
     const frames = allFrames.filter(f => f.shot_id === s.id);
 
     const tid = (s as unknown as { prompt_template_id?: string }).prompt_template_id ?? null;
@@ -58,7 +69,9 @@ const result = shots.map((s) => {
       _char1_name:  charNames[0],
       _char2_name:  charNames[1],
     };
-    const template_resolved = resolveAllVars(shotForTemplate, charAppearance);
+    const locId = (s as unknown as { location_id?: string | null }).location_id ?? null;
+    const loc = locId ? locationMap[locId] ?? null : null;
+    const template_resolved = resolveAllVars(shotForTemplate, charAppearance, loc?.description ?? null);
 
     return {
       ...s,
@@ -71,6 +84,8 @@ const result = shots.map((s) => {
       prompt_template_formula: tmpl?.formula ?? null,
       prompt_template_name: tmpl?.name ?? null,
       template_resolved,
+      location_id: locId,
+      location_name: loc?.name ?? null,
       generations: gens.map(g => ({
         id: g.id, type: g.type,
         model: (() => {
@@ -112,6 +127,7 @@ export async function POST(req: NextRequest, { params }: { params: Promise<{ id:
     project_id: ep.project_id,
     shot_number: maxNum + 1,
     character: body.character?.trim() || null,
+    location_id: body.location_id?.trim() || null,
     shot_description,
     environment: body.environment?.trim() || "unspecified",
     lighting: body.lighting?.trim() || "natural",

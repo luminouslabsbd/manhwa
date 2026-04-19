@@ -111,6 +111,19 @@ export function readGenerated(filePathOrUrl: string): Buffer {
   return fs.readFileSync(toLocalPath(filePathOrUrl));
 }
 
+/**
+ * Upload an already-written `/generated/...` file from local disk to DO Spaces.
+ * Used by flows that write via ffmpeg directly (e.g. mergeAudioVideo) so the
+ * result is reachable via the CDN on other hosts. No-ops if Spaces isn't configured.
+ */
+export async function uploadGeneratedFromDisk(relativePath: string): Promise<void> {
+  if (!spacesConfig()) return;
+  const localPath = toLocalPath(relativePath);
+  if (!fs.existsSync(localPath)) return;
+  const buf = fs.readFileSync(localPath);
+  await uploadToSpaces(buf, relativePath);
+}
+
 export function generatedExists(filePathOrUrl: string): boolean {
   try { return fs.existsSync(toLocalPath(filePathOrUrl)); }
   catch { return false; }

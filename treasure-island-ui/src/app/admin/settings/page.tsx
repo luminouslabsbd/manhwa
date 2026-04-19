@@ -1,8 +1,11 @@
 import { getPodConfig } from "@/lib/pod-config";
+import { getAppConfig } from "@/lib/app-config";
 import HostConfigForm from "./HostConfigForm";
+import VideoModelForm from "./VideoModelForm";
 
-export default function SettingsPage() {
+export default async function SettingsPage() {
   const cfg = getPodConfig();
+  const app = await getAppConfig();
 
   const initial = {
     comfyuiHost: cfg.comfyuiHost ?? "",
@@ -18,6 +21,14 @@ export default function SettingsPage() {
         <p style={{ margin: 0, fontSize: 13, color: "var(--muted)" }}>
           Configure service endpoints for generation. Changes take effect immediately — no restart needed.
         </p>
+      </div>
+
+      <div className="card" style={{ padding: 28 }}>
+        <h2 style={{ margin: "0 0 8px", fontSize: 16, fontWeight: 700 }}>Video Model</h2>
+        <p style={{ margin: "0 0 18px", fontSize: 12, color: "var(--muted)" }}>
+          Model used for the image-to-video step. Pods are provisioned with LTX-Video 0.9.7 distilled only.
+        </p>
+        <VideoModelForm initial={app.video_model} />
       </div>
 
       <div className="card" style={{ padding: 28 }}>

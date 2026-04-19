@@ -1,4 +1,4 @@
-import { getHistory, fetchImageAsBase64, uploadImage, queuePrompt, buildWan2_1_I2VWorkflow_14B, buildWan2_1_I2VWorkflow, getHost } from "@/lib/comfyui";
+import { getHistory, fetchImageAsBase64, uploadImage, queuePrompt, buildLTX2_I2VWorkflow, getHost } from "@/lib/comfyui";
 import { mergeAudioVideo } from "@/lib/ffmpeg-utils";
 import { drainQueue } from "@/lib/gen-queue";
 import { prisma } from "@/lib/prisma";
@@ -54,17 +54,8 @@ export async function GET() {
           const imgBuffer = readGenerated(gen.image_path);
           const imgName = `shot_${gen.shot_id}_${gen.id.slice(0, 8)}.png`;
           const uploadData = await uploadImage(imgBuffer, imgName, host);
-          let prompt_id: string;
-          try {
-            const wf = buildWan2_1_I2VWorkflow_14B(shot.full_prompt, uploadData.name, gen.seed ?? 42, durationFrames);
-            prompt_id = (await queuePrompt(wf, host)).prompt_id;
-          } catch (wanErr) {
-            const msg = wanErr instanceof Error ? wanErr.message : String(wanErr);
-            if (msg.includes("wan2.1-i2v-14b") || msg.includes("not in list") || msg.includes("T2V") || msg.includes("t2v") || msg.includes("validation")) {
-              const t2vWf = buildWan2_1_I2VWorkflow(shot.full_prompt, "", gen.seed ?? 42, durationFrames);
-              prompt_id = (await queuePrompt(t2vWf, host)).prompt_id;
-            } else { throw wanErr; }
-          }
+          const wf = buildLTX2_I2VWorkflow(shot.full_prompt, uploadData.name, gen.seed ?? 42, durationFrames);
+          const prompt_id = (await queuePrompt(wf, host)).prompt_id;
           await prisma.generation.update({
             where: { id: gen.id },
             data: { status: "running", comfyui_prompt_id: prompt_id },
@@ -299,19 +290,8 @@ export async function GET() {
         const imgName = `shot_${gen.shot_id}_${gen.id.slice(0, 8)}.png`;
         const uploadData = await uploadImage(imgBuffer, imgName, host);
 
-        let prompt_id: string;
-        try {
-          const wf = buildWan2_1_I2VWorkflow_14B(shot.full_prompt, uploadData.name, gen.seed ?? 42, durationFrames);
-          prompt_id = (await queuePrompt(wf, host)).prompt_id;
-        } catch (wanErr) {
-          const msg = wanErr instanceof Error ? wanErr.message : String(wanErr);
-          if (msg.includes("wan2.1-i2v-14b") || msg.includes("not in list") || msg.includes("T2V") || msg.includes("t2v") || msg.includes("validation")) {
-            const t2vWf = buildWan2_1_I2VWorkflow(shot.full_prompt, "", gen.seed ?? 42, durationFrames);
-            prompt_id = (await queuePrompt(t2vWf, host)).prompt_id;
-          } else {
-            throw wanErr;
-          }
-        }
+        const wf = buildLTX2_I2VWorkflow(shot.full_prompt, uploadData.name, gen.seed ?? 42, durationFrames);
+        const prompt_id = (await queuePrompt(wf, host)).prompt_id;
 
         await prisma.generation.update({
           where: { id: gen.id },

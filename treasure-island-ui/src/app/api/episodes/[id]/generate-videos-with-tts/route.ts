@@ -1,5 +1,5 @@
 import { prisma } from "@/lib/prisma";
-import { queuePrompt, buildWan2_1_I2VWorkflow, uploadImage, getVideoHost } from "@/lib/comfyui";
+import { queuePrompt, buildLTX2_I2VWorkflow, uploadImage, getVideoHost } from "@/lib/comfyui";
 import { generateSpeech } from "@/lib/tts";
 import { randomUUID } from "crypto";
 import fs from "fs";
@@ -35,8 +35,6 @@ export async function POST(req: Request, { params }: { params: Promise<{ id: str
   const episode = await prisma.episode.findUnique({ where: { id: episodeId } });
   if (!episode) return Response.json({ error: "Episode not found" }, { status: 404 });
 
-  const project = await prisma.project.findUnique({ where: { id: episode.project_id } });
-  const modelOverride = project?.pipeline_model ?? null;
 
   const shots = await prisma.shot.findMany({
     where: {
@@ -101,7 +99,7 @@ export async function POST(req: Request, { params }: { params: Promise<{ id: str
         const imgName = `shot_${shot.id}.png`;
         const uploadData = await uploadImage(imgBuffer, imgName, host);
         const seed = Math.floor(Math.random() * 999999);
-        const wf = buildWan2_1_I2VWorkflow(shot.full_prompt, uploadData.name, seed, durationFrames, modelOverride);
+        const wf = buildLTX2_I2VWorkflow(shot.full_prompt, uploadData.name, seed, durationFrames);
         const { prompt_id } = await queuePrompt(wf, host);
 
         const now = new Date().toISOString();

@@ -65,7 +65,6 @@ useEffect(() => { if (shot.status !== "generating") setGenPending(false); }, [sh
 const isGenerating = genPending || shot.status === "generating";
 const noCharacter = !shot.character?.trim();
 const inVideoState = shot.status === "video_done" || shot.status === "video_generating";
-  const showVideo = inVideoState && shot.latest_video;
   const isApproved = ["approved", "video_generating", "video_done"].includes(shot.status);
   const isVideoGenerating = shot.status === "video_generating";
   const statusLabel = shot.status === "video_generating" ? "🎬 rendering…" : shot.status === "video_done" ? "🎬 video done" : shot.status;
@@ -76,7 +75,7 @@ const inVideoState = shot.status === "video_done" || shot.status === "video_gene
   const hasFrames = frames.length > 0;
 
   const hasImages = (shot.generations ?? []).some(g => (g.type === "image" || g.type.startsWith("image:")) && g.image_path);
-  const hasVideos = (shot.generations ?? []).some(g => g.type === "video" && g.video_path);
+  const hasVideos = (shot.generations ?? []).some(g => (g.type === "video" || g.type.startsWith("video:")) && g.video_path);
   const hasTTS = !!shot.audio_path;
   const hasReview = hasImages || hasVideos || hasTTS;
 
@@ -94,8 +93,10 @@ const inVideoState = shot.status === "video_done" || shot.status === "video_gene
   // ── Video model ────────────────────────────────────────────
   const approvedVidGen = shot.approved_video_id
     ? gens.find(g => g.id === shot.approved_video_id)
-    : gens.filter(g => g.type === "video" && g.video_path).sort((a, b) => b.created_at.localeCompare(a.created_at))[0];
+    : gens.filter(g => (g.type === "video" || g.type.startsWith("video:")) && g.video_path).sort((a, b) => b.created_at.localeCompare(a.created_at))[0];
   const videoModel = approvedVidGen ? modelFromType(approvedVidGen.type) : null;
+  // Thumbnail prefers merged video+audio → approved video → latest_video fallback
+  const thumbVideoSrc = shot.video_audio_path ?? approvedVidGen?.video_path ?? (inVideoState ? shot.latest_video : null);
 
   const hasTemplate = !!shot.prompt_template_formula;
   const resolved = shot.template_resolved ?? {};
@@ -107,8 +108,8 @@ const inVideoState = shot.status === "video_done" || shot.status === "video_gene
         style={{ position: "relative", background: "var(--bg2)", height: hasFrames ? 140 : 200, overflow: "hidden", cursor: "pointer" }}
         onClick={onImageClick}
       >
-        {showVideo ? (
-          <video src={shot.latest_video!} style={{ width: "100%", height: "100%", objectFit: "cover" }} muted playsInline loop autoPlay />
+        {thumbVideoSrc ? (
+          <video src={thumbVideoSrc} style={{ width: "100%", height: "100%", objectFit: "cover" }} muted playsInline loop autoPlay />
         ) : (approvedImgGen?.image_path ?? shot.latest_image) ? (
           <img src={approvedImgGen?.image_path ?? shot.latest_image!} alt={`Shot ${shot.shot_number}`} style={{ width: "100%", height: "100%", objectFit: "contain" }} />
         ) : (

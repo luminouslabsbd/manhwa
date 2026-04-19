@@ -35,6 +35,13 @@ export async function POST(req: Request, { params }: { params: Promise<{ id: str
     templateMap = Object.fromEntries(templates.map(t => [t.id, { formula: t.formula, name: t.name }]));
   } catch { /* template table may not exist yet */ }
 
+  // Load locations — used to inject location-specific description into prompts
+  let locationMap: Record<string, { name: string; description: string }> = {};
+  try {
+    const locs = await prisma.location.findMany({ where: { project_id: ep.project_id } });
+    locationMap = Object.fromEntries(locs.map(l => [l.id, { name: l.name, description: l.description }]));
+  } catch { /* locations table may not exist on older DBs */ }
+
   // Get prompt settings for LLM
   const settings = (db.prompt_settings ?? []).find((ps: { project_id: string }) => ps.project_id === ep.project_id) ?? null;
 
@@ -49,6 +56,10 @@ export async function POST(req: Request, { params }: { params: Promise<{ id: str
       const tid = (shot as unknown as { prompt_template_id?: string }).prompt_template_id ?? null;
       const tmpl = tid ? templateMap[tid] ?? null : null;
 
+      // Resolve location (may be null)
+      const locId = (shot as unknown as { location_id?: string | null }).location_id ?? null;
+      const locDesc = locId ? locationMap[locId]?.description ?? null : null;
+
       // Multi-char helper
       const charNames = (shot.character ?? "").split(",").map((n: string) => n.trim()).filter(Boolean);
       const buildCharBlock = (withAppearance: boolean) => charNames.map((name: string) => {
@@ -59,7 +70,7 @@ export async function POST(req: Request, { params }: { params: Promise<{ id: str
       if (tmpl) {
         // Template-based rendering — pass combined appearance block as charAppearance
         const charAppearance = charNames.length > 0 ? buildCharBlock(true) : null;
-        full_prompt = renderTemplate(tmpl.formula, shot, charAppearance);
+        full_prompt = renderTemplate(tmpl.formula, shot, charAppearance, locDesc);
       } else if (useLLM) {
         // Build character block
         const charBlock = charNames.length > 0
@@ -69,6 +80,8 @@ export async function POST(req: Request, { params }: { params: Promise<{ id: str
 
         const envDesc = ENV_MAP[shot.environment?.toLowerCase() ?? ""] ?? shot.environment ?? "unspecified location";
         const lightDesc = LIGHTING_MAP[shot.lighting?.toLowerCase() ?? ""] ?? shot.lighting ?? "cinematic lighting";
+        const locLine = locDesc ? `Location (reuse exact same set across shots): ${locDesc}\n` : "";
+        const sceneParts = [envDesc, locDesc].filter(Boolean).join(", ");
 
         const prompt = `You are a ComfyUI prompt writer for a manhwa/anime production.
 
@@ -76,11 +89,11 @@ Project: ${project?.name ?? "Unknown"}
 Shot ${shot.shot_number}: ${shot.shot_description}
 Camera: ${shot.camera_angle}
 Environment: ${envDesc}
-Lighting: ${lightDesc}
+${locLine}Lighting: ${lightDesc}
 ${charBlockLabel}
 
 Write a single ComfyUI image generation prompt (one line, no JSON, no explanation).
-${charNames.length > 1 ? "Use BREAK keyword to separate character regions. Format: [shared context] BREAK [left: CharA action] BREAK [right: CharB action]" : "Structure: [character appearance if any], [shot action/composition], " + envDesc + ", " + STYLE_PACK + ", " + lightDesc}
+${charNames.length > 1 ? "Use BREAK keyword to separate character regions. Format: [shared context] BREAK [left: CharA action] BREAK [right: CharB action]" : "Structure: [character appearance if any], [shot action/composition], " + sceneParts + ", " + STYLE_PACK + ", " + lightDesc}
 Keep it under 200 words. Be specific and visual. Do NOT use bracket placeholders.`;
 
         full_prompt = (await llmText(prompt, settings)).trim();
@@ -92,8 +105,9 @@ Keep it under 200 words. Be specific and visual. Do NOT use bracket placeholders
         const lightDesc = LIGHTING_MAP[shot.lighting?.toLowerCase() ?? ""] ?? shot.lighting ?? "cinematic lighting";
         const camDesc = shot.camera_angle ?? "medium shot";
         const charPrefix = charBlock ? `${charBlock}, ` : "";
+        const locInsert = locDesc ? `, ${locDesc}` : "";
 
-        full_prompt = `${charPrefix}${shot.shot_description}, ${camDesc}, ${envDesc}, ${STYLE_PACK}, ${lightDesc}`.replace(/,\s*,/g, ",").trim();
+        full_prompt = `${charPrefix}${shot.shot_description}, ${camDesc}, ${envDesc}${locInsert}, ${STYLE_PACK}, ${lightDesc}`.replace(/,\s*,/g, ",").trim();
       }
 
       shot.full_prompt = full_prompt;

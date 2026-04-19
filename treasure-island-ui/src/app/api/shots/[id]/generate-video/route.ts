@@ -1,6 +1,6 @@
 import { load } from "@/lib/db";
 import { prisma } from "@/lib/prisma";
-import { queuePrompt, buildWan2_1_I2VWorkflow, buildWan2_1_I2VWorkflow_14B, buildI2VWorkflow, uploadImage, getVideoHost, resolveAvailableCheckpoint, type VideoQualityPreset, VIDEO_QUALITY_PRESETS } from "@/lib/comfyui";
+import { queuePrompt, buildLTX2_I2VWorkflow, buildI2VWorkflow, uploadImage, getVideoHost, resolveAvailableCheckpoint, type VideoQualityPreset, VIDEO_QUALITY_PRESETS } from "@/lib/comfyui";
 import { getPodConfig } from "@/lib/pod-config";
 import { fetchGenerated } from "@/lib/storage";
 import { randomUUID } from "crypto";
@@ -43,7 +43,8 @@ export async function POST(req: Request, { params }: { params: Promise<{ id: str
   const host = getVideoHost();
   const project = db.projects.find((p) => p.id === shot.project_id);
   const modelOverride = project?.pipeline_model;
-  const configPreset = getPodConfig().videoQualityPreset ?? "balanced";
+  const podCfg = getPodConfig();
+  const configPreset = podCfg.videoQualityPreset ?? "balanced";
   const preset: VideoQualityPreset = (body.preset && body.preset in VIDEO_QUALITY_PRESETS)
     ? body.preset as VideoQualityPreset
     : configPreset;
@@ -98,33 +99,14 @@ export async function POST(req: Request, { params }: { params: Promise<{ id: str
         const uploadData = await uploadImage(imgBuffer, imgName, host);
 
         try {
-          // Try I2V 14B first (image-conditioned). Falls back if model not present.
-          const wf = buildWan2_1_I2VWorkflow_14B(shot.full_prompt, uploadData.name, seed, durationFrames, preset);
+          const wf = buildLTX2_I2VWorkflow(shot.full_prompt, uploadData.name, seed, durationFrames, preset);
           prompt_id = (await queuePrompt(wf, host)).prompt_id;
-          genType = "video";
-        } catch (wanErr) {
-          i2vError = wanErr instanceof Error ? wanErr.message : String(wanErr);
+          genType = "video:ltx2";
+        } catch (ltxErr) {
+          i2vError = ltxErr instanceof Error ? ltxErr.message : String(ltxErr);
           const msg = i2vError;
-          if (msg.includes("wan2.1-i2v-14b") || msg.includes("not in list") || msg.includes("T2V") || msg.includes("t2v") || msg.includes("validation")) {
-            // I2V model not available or validation failed — use T2V text-driven fallback.
-            // If T2V also fails (e.g. pod has no Wan models at all), drop to SDXL img2img.
-            try {
-              const t2vWf = buildWan2_1_I2VWorkflow(shot.full_prompt, "", seed, durationFrames, modelOverride);
-              prompt_id = (await queuePrompt(t2vWf, host)).prompt_id;
-              genType = "video:t2v_fallback";
-            } catch (t2vErr) {
-              const t2vMsg = t2vErr instanceof Error ? t2vErr.message : String(t2vErr);
-              if (t2vMsg.includes("not in list") || t2vMsg.includes("WanVideoModelLoader") || t2vMsg.includes("missing_node_type") || t2vMsg.includes("validation")) {
-                const ckpt = await resolveAvailableCheckpoint(modelOverride, host);
-                const fallbackWf = buildI2VWorkflow(shot.full_prompt, uploadData.name, seed, durationFrames, ckpt);
-                prompt_id = (await queuePrompt(fallbackWf, host)).prompt_id;
-                genType = "video:i2v_fallback";
-              } else {
-                throw t2vErr;
-              }
-            }
-          } else if (msg.includes("WanVideoModelLoader") || msg.includes("missing_node_type") || msg.includes("Node 'Wan")) {
-            // WanVideo nodes not installed — SDXL img2img last resort.
+          if (msg.includes("ltxv-13b") || msg.includes("not in list") || msg.includes("missing_node_type") || msg.includes("validation") || msg.includes("LTXV")) {
+            // LTX model or nodes unavailable — SDXL img2img last resort.
             // Query the pod's actual checkpoint catalog so we don't hit "value_not_in_list"
             // when the env default (e.g. flux1-schnell) isn't loaded on an SDXL-only pod.
             const ckpt = await resolveAvailableCheckpoint(modelOverride, host);
@@ -135,7 +117,7 @@ export async function POST(req: Request, { params }: { params: Promise<{ id: str
             // ComfyUI HTTP API unresponsive (pod busy generating) — save as queued for later
             podBusy = true;
           } else {
-            throw wanErr;
+            throw ltxErr;
           }
         }
       } catch (uploadErr) {

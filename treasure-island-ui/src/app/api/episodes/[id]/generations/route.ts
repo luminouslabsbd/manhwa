@@ -4,17 +4,17 @@ import fs from "fs";
 import path from "path";
 
 /**
- * DELETE /api/shots/:id/generations
+ * DELETE /api/episodes/:id/generations
  *
  * Query params:
- *   ?category=video|image|tts|all   (default: all — matches legacy behaviour)
- *   ?model=ltx2|wan2|any             (optional, video only)
+ *   ?category=video|image|tts|all   (default: all)
+ *   ?model=ltx2|wan2|any             (optional — restricts to a specific model; "any" = no filter)
  *
- * With default params this resets the shot completely. Pass filters to delete
- * only a subset (e.g. all LTX-2 videos while keeping Wan 2.1 ones).
+ * Bulk-deletes generations across every shot in the episode. Also clears approvals
+ * and file contents for deleted records.
  */
 export async function DELETE(req: Request, { params }: { params: Promise<{ id: string }> }) {
-  const { id } = await params;
+  const { id: episodeId } = await params;
   const url = new URL(req.url);
   const category = (url.searchParams.get("category") ?? "all").toLowerCase();
   const model = (url.searchParams.get("model") ?? "any").toLowerCase();
@@ -24,8 +24,8 @@ export async function DELETE(req: Request, { params }: { params: Promise<{ id: s
   }
 
   const db = await load();
-  const shot = db.shots.find(s => s.id === id);
-  if (!shot) return Response.json({ error: "Not found" }, { status: 404 });
+  const shotIds = new Set(db.shots.filter(s => s.episode_id === episodeId).map(s => s.id));
+  if (!shotIds.size) return Response.json({ error: "Episode has no shots" }, { status: 404 });
 
   const matchesCategory = (type: string): boolean => {
     if (category === "all")   return true;
@@ -42,11 +42,11 @@ export async function DELETE(req: Request, { params }: { params: Promise<{ id: s
   };
 
   const toDelete = db.generations.filter(g =>
-    g.shot_id === id && matchesCategory(g.type) && matchesModel(g.type)
+    shotIds.has(g.shot_id) && matchesCategory(g.type) && matchesModel(g.type)
   );
   if (!toDelete.length) return Response.json({ ok: true, deleted: 0 });
 
-  // Delete files from disk (best-effort; DO Spaces objects are left to GC)
+  // Remove local files (best-effort)
   for (const gen of toDelete) {
     for (const p of [gen.image_path, gen.video_path, gen.audio_path]) {
       if (!p) continue;
@@ -60,29 +60,33 @@ export async function DELETE(req: Request, { params }: { params: Promise<{ id: s
   const deletedIds = new Set(toDelete.map(g => g.id));
   db.generations = db.generations.filter(g => !deletedIds.has(g.id));
 
-  // Clean approvals + shot state
-  if (shot.approved_image_id && deletedIds.has(shot.approved_image_id)) {
-    shot.approved_image_id = null;
-    shot.approved_image_ids = (shot.approved_image_ids ?? []).filter((gid: string) => !deletedIds.has(gid));
-    shot.status = "draft";
-  } else if (shot.approved_image_ids?.length) {
-    shot.approved_image_ids = shot.approved_image_ids.filter((gid: string) => !deletedIds.has(gid));
-  }
-  if (shot.approved_video_id && deletedIds.has(shot.approved_video_id)) {
-    shot.approved_video_id = null;
-  }
-  if (category === "tts" || category === "all") {
-    shot.audio_path = null;
-    shot.video_audio_path = null;
+  // Clear approvals + reset affected shots when those generations were approved
+  for (const shot of db.shots) {
+    if (!shotIds.has(shot.id)) continue;
+    if (shot.approved_image_id && deletedIds.has(shot.approved_image_id)) {
+      shot.approved_image_id = null;
+      shot.approved_image_ids = (shot.approved_image_ids ?? []).filter((gid: string) => !deletedIds.has(gid));
+      shot.status = "draft";
+    } else if (shot.approved_image_ids?.length) {
+      shot.approved_image_ids = shot.approved_image_ids.filter((gid: string) => !deletedIds.has(gid));
+    }
+    if (shot.approved_video_id && deletedIds.has(shot.approved_video_id)) {
+      shot.approved_video_id = null;
+    }
+    // If the shot's stored audio was deleted as part of TTS cleanup, clear it
+    if (category === "tts" || category === "all") {
+      shot.audio_path = null;
+      shot.video_audio_path = null;
+    }
   }
 
   await save(db);
 
-  // Reset frame media only when images (or all) were wiped
+  // Reset frame media when images were deleted
   if (category === "image" || category === "all") {
     try {
       await prisma.frame.updateMany({
-        where: { shot_id: id },
+        where: { shot_id: { in: [...shotIds] } },
         data: { image_path: null, video_path: null, status: "draft" },
       });
     } catch { /* frames table may not exist */ }

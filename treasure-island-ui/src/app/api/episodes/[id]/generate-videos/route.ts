@@ -1,5 +1,5 @@
 import { prisma } from "@/lib/prisma";
-import { queuePrompt, buildWan2_1_I2VWorkflow_14B, buildWan2_1_I2VWorkflow, uploadImage, getVideoHost } from "@/lib/comfyui";
+import { queuePrompt, buildLTX2_I2VWorkflow, uploadImage, getVideoHost } from "@/lib/comfyui";
 import { fetchGenerated } from "@/lib/storage";
 import { randomUUID } from "crypto";
 
@@ -26,8 +26,6 @@ export async function POST(_: Request, { params }: { params: Promise<{ id: strin
 
   const episode = await prisma.episode.findUnique({ where: { id } });
   if (!episode) return Response.json({ error: "Episode not found" }, { status: 404 });
-
-  const project = await prisma.project.findUnique({ where: { id: episode.project_id } });
 
   // Only shots with an approved image, no approved video, and not already generating
   const shots = await prisma.shot.findMany({
@@ -76,14 +74,8 @@ export async function POST(_: Request, { params }: { params: Promise<{ id: strin
       const uploadData = await uploadImage(imgBuffer, imgName, host);
       const seed = Math.floor(Math.random() * 999999);
 
-      let prompt_id: string;
-      try {
-        const wf = buildWan2_1_I2VWorkflow_14B(shot.full_prompt, uploadData.name, seed, durationFrames);
-        prompt_id = (await queuePrompt(wf, host)).prompt_id;
-      } catch {
-        const wf = buildWan2_1_I2VWorkflow(shot.full_prompt, uploadData.name, seed, durationFrames, project?.pipeline_model);
-        prompt_id = (await queuePrompt(wf, host)).prompt_id;
-      }
+      const wf = buildLTX2_I2VWorkflow(shot.full_prompt, uploadData.name, seed, durationFrames);
+      const prompt_id = (await queuePrompt(wf, host)).prompt_id;
 
       await prisma.generation.create({
         data: {

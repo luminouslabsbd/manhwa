@@ -25,10 +25,10 @@ install_node() {
   fi
 }
 
-install_node https://github.com/kijai/ComfyUI-WanVideoWrapper
+install_node https://github.com/Lightricks/ComfyUI-LTXVideo
 install_node https://github.com/Kosinkadink/ComfyUI-VideoHelperSuite
 
-# Fix torchaudio ABI mismatch — WanVideoWrapper imports it at load time
+# Fix torchaudio ABI mismatch — LTX custom node imports it at load time
 TORCH_VER=\$(python3 -c "import torch; print(torch.__version__.split('+')[0])" 2>/dev/null)
 CUDA_TAG=\$(python3 -c "import torch; v=torch.__version__; print(v.split('+')[1] if '+' in v else 'cpu')" 2>/dev/null)
 if [ -n "\$TORCH_VER" ]; then

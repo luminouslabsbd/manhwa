@@ -59,6 +59,7 @@ export const TEMPLATE_VARS: TemplateVarDef[] = [
   { key: "shot",       label: "Shot Desc",    hint: "Shot description / action",                         color: "#4ade80" },
   { key: "camera",     label: "Camera",       hint: "Camera angle",                                      color: "#f59e0b" },
   { key: "env",        label: "Environment",  hint: "Resolved environment description",                  color: "#2dd4bf" },
+  { key: "location",   label: "Location",     hint: "Location brick description (specific set / room)",  color: "#facc15" },
   { key: "lighting",   label: "Lighting",     hint: "Resolved lighting description",                     color: "#fb923c" },
   { key: "style",      label: "Style Pack",   hint: "Full manhwa/anime style pack",                      color: "#a78bfa" },
   { key: "interaction",label: "Interaction",  hint: "Interaction type description for spatial positioning", color: "#e879f9" },
@@ -66,10 +67,11 @@ export const TEMPLATE_VARS: TemplateVarDef[] = [
 
 export const VAR_COLOR: Record<string, string> = Object.fromEntries(TEMPLATE_VARS.map(v => [v.key, v.color]));
 
-export const DEFAULT_FORMULA = "[char], [shot], [camera], [env], [style], [lighting]";
+export const DEFAULT_FORMULA = "[char], [shot], [camera], [env], [location], [style], [lighting]";
 
 export interface ShotLike {
   character?: string | null;
+  location_id?: string | null;
   shot_description: string;
   camera_angle: string;
   environment: string;
@@ -82,7 +84,12 @@ export interface ShotLike {
   _char2_name?: string;
 }
 
-export function resolveVar(varKey: string, shot: ShotLike, charAppearance?: string | null): string {
+export function resolveVar(
+  varKey: string,
+  shot: ShotLike,
+  charAppearance?: string | null,
+  locationDesc?: string | null,
+): string {
   switch (varKey) {
     case "char": {
       const raw = shot.character ?? "";
@@ -98,6 +105,7 @@ export function resolveVar(varKey: string, shot: ShotLike, charAppearance?: stri
     case "shot": return shot.shot_description;
     case "camera": return shot.camera_angle;
     case "env": return ENV_MAP[shot.environment?.toLowerCase() ?? ""] ?? shot.environment ?? "";
+    case "location": return locationDesc ?? "";
     case "lighting": return LIGHTING_MAP[shot.lighting?.toLowerCase() ?? ""] ?? shot.lighting ?? "";
     case "style": return STYLE_PACK;
     case "interaction": {
@@ -108,14 +116,23 @@ export function resolveVar(varKey: string, shot: ShotLike, charAppearance?: stri
   }
 }
 
-export function renderTemplate(formula: string, shot: ShotLike, charAppearance?: string | null): string {
-  const result = formula.replace(/\[([a-z_]+)\]/g, (_, key) => resolveVar(key, shot, charAppearance));
+export function renderTemplate(
+  formula: string,
+  shot: ShotLike,
+  charAppearance?: string | null,
+  locationDesc?: string | null,
+): string {
+  const result = formula.replace(/\[([a-z_]+)\]/g, (_, key) => resolveVar(key, shot, charAppearance, locationDesc));
   return result.replace(/,\s*,/g, ",").replace(/,\s*$/g, "").trim();
 }
 
 /** Resolved values for all known variables for a given shot */
-export function resolveAllVars(shot: ShotLike, charAppearance?: string | null): Record<string, string> {
-  return Object.fromEntries(TEMPLATE_VARS.map(v => [v.key, resolveVar(v.key, shot, charAppearance)]));
+export function resolveAllVars(
+  shot: ShotLike,
+  charAppearance?: string | null,
+  locationDesc?: string | null,
+): Record<string, string> {
+  return Object.fromEntries(TEMPLATE_VARS.map(v => [v.key, resolveVar(v.key, shot, charAppearance, locationDesc)]));
 }
 
 // Parse formula into segments: plain text or var tokens

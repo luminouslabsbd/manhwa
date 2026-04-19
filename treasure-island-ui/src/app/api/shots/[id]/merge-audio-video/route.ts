@@ -19,10 +19,15 @@ export async function POST(req: Request, { params }: { params: Promise<{ id: str
     );
   }
 
-  // Find the latest video generation
-  const latestVideoGen = db.generations.find(
-    (g) => g.shot_id === id && g.type === "video" && g.status === "completed" && g.video_path
-  );
+  // Find the latest video generation (prefer approved, any video/video:* type)
+  const isVideoType = (g: { type: string }) => g.type === "video" || g.type.startsWith("video:");
+  const approvedGen = shot.approved_video_id
+    ? db.generations.find((g) => g.id === shot.approved_video_id && g.status === "completed" && g.video_path)
+    : null;
+  const latestVideoGen = approvedGen ?? [...db.generations]
+    .filter((g) => g.shot_id === id && isVideoType(g) && g.status === "completed" && g.video_path)
+    .sort((a, b) => (a.created_at ?? "").localeCompare(b.created_at ?? ""))
+    .pop() ?? null;
 
   if (!latestVideoGen?.video_path) {
     return Response.json(

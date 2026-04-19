@@ -560,210 +560,109 @@ export const VIDEO_QUALITY_PRESETS: Record<VideoQualityPreset, {
   },
 };
 
-// WORKFLOW 4b: Wan 2.1 I2V 14B — true image-to-video
-// Requires wan2.1-i2v-14b-480p-fp8.safetensors in diffusion_models/
 // ══════════════════════════════════════════════════════════════════════
-export function buildWan2_1_I2VWorkflow_14B(
+// Wan 2.1 I2V 14B and T2V 1.3B workflow builders were removed on 2026-04-19.
+// Pods no longer download Wan checkpoints / install WanVideoWrapper; see
+// scripts/pod-setup.sh and git history for the previous implementation.
+// ══════════════════════════════════════════════════════════════════════
+
+// ══════════════════════════════════════════════════════════════════════
+// WORKFLOW 5: LTX-Video 2 (I2V) — fast image-to-video via Lightricks LTX-2
+// Uses ComfyUI's native LTXV* nodes (bundled since ComfyUI commit ~Nov 2024).
+// Requires ltxv-13b-0.9.7-distilled.safetensors in models/checkpoints/
+// and t5xxl_fp16.safetensors in models/text_encoders/
+// The distilled variant is step-compressed: cfg=1.0 and ~8 steps max
+// produce the best quality. Higher step counts waste compute and can
+// introduce artifacts on this model.
+// ══════════════════════════════════════════════════════════════════════
+export function buildLTX2_I2VWorkflow(
   prompt: string,
   imageName: string,
   seed: number,
-  durationFrames: number = 81,
+  durationFrames: number = 97,
   preset: VideoQualityPreset = "balanced",
 ) {
-  const prefix = `studio/wan2i2v_${Date.now()}`;
-  const { fps: FPS, maxFrames, steps } = VIDEO_QUALITY_PRESETS[preset];
+  const prefix = `studio/ltx2_${Date.now()}`;
+  const { fps: FPS, maxFrames } = VIDEO_QUALITY_PRESETS[preset];
+  // LTX requires frames divisible by 8 plus 1
   const clampedFrames = Math.min(durationFrames, maxFrames);
-  const frames = Math.max(5, Math.round((clampedFrames - 1) / 4) * 4 + 1);
+  const frames = Math.max(9, Math.round((clampedFrames - 1) / 8) * 8 + 1);
+  // Distilled model: 8 steps is the sweet spot, cfg=1.0 (no classifier-free guidance).
+  const steps = 8;
+  const cfg = 1.0;
 
   return {
-    // Block-swap config — offloads 20/40 transformer blocks to CPU RAM so the
-    // 14B fp8 model + umt5-xxl text encoder fit on 24GB GPUs (3090/4090).
-    // Without this the workflow OOMs at the WanVideoSampler step.
-    "0": {
-      class_type: "WanVideoBlockSwap",
-      inputs: {
-        blocks_to_swap: 20,
-        offload_img_emb: true,
-        offload_txt_emb: true,
-        use_non_blocking: true,
-        // These are "optional" in the ComfyUI schema but node code compares them
-        // as ints unconditionally. If omitted they pass as None → TypeError.
-        vace_blocks_to_swap: 0,
-        prefetch_blocks: 0,
-        block_swap_debug: false,
-      },
-    },
     "1": {
-      class_type: "WanVideoModelLoader",
-      inputs: {
-        model: "wan2.1-i2v-14b-480p-fp8.safetensors",
-        base_precision: "bf16",
-        quantization: "fp8_e4m3fn",
-        load_device: "offload_device",
-        block_swap_args: ["0", 0],
-      },
+      class_type: "CheckpointLoaderSimple",
+      inputs: { ckpt_name: "ltxv-13b-0.9.7-distilled.safetensors" },
     },
     "2": {
-      class_type: "LoadWanVideoT5TextEncoder",
-      inputs: { model_name: "umt5-xxl-fp16.safetensors", precision: "bf16", quantization: "fp8_e4m3fn", load_device: "offload_device" },
+      class_type: "CLIPLoader",
+      inputs: { clip_name: "t5xxl_fp16.safetensors", type: "ltxv" },
     },
     "3": {
-      class_type: "WanVideoVAELoader",
-      inputs: { model_name: "wan_2.1_vae.safetensors", precision: "bf16", load_device: "offload_device" },
-    },
-    "4": {
       class_type: "LoadImage",
       inputs: { image: imageName },
     },
+    "4": {
+      class_type: "CLIPTextEncode",
+      inputs: { text: prompt, clip: ["2", 0] },
+    },
     "5": {
-      class_type: "WanVideoTextEncode",
-      inputs: {
-        positive_prompt: prompt,
-        negative_prompt: "static image, no motion, blurry, low quality, worst quality",
-        t5: ["2", 0],
-        force_offload: true,
-        model_to_offload: ["1", 0],
-      },
+      class_type: "CLIPTextEncode",
+      inputs: { text: "low quality, worst quality, blurry, distorted, static, still image", clip: ["2", 0] },
     },
     "6": {
-      class_type: "WanVideoImageToVideoEncode",
+      class_type: "LTXVImgToVideo",
       inputs: {
-        width: 832, height: 480, num_frames: frames,
-        noise_aug_strength: 0.0,
-        start_latent_strength: 1.0,
-        end_latent_strength: 0.0,
-        force_offload: true,
-        vae: ["3", 0],
-        start_image: ["4", 0],
+        positive: ["4", 0], negative: ["5", 0],
+        vae: ["1", 2], image: ["3", 0],
+        width: 768, height: 512, length: frames, batch_size: 1, strength: 1.0,
       },
     },
     "7": {
-      class_type: "WanVideoSampler",
-      inputs: {
-        model: ["1", 0], image_embeds: ["6", 0], text_embeds: ["5", 0],
-        steps, cfg: 6.0, shift: 5.0, seed, force_offload: true,
-        scheduler: "unipc", riflex_freq_index: 0,
-      },
+      class_type: "LTXVConditioning",
+      inputs: { positive: ["6", 0], negative: ["6", 1], frame_rate: FPS },
     },
     "8": {
-      class_type: "WanVideoDecode",
-      inputs: { vae: ["3", 0], samples: ["7", 0], enable_vae_tiling: true, tile_x: 272, tile_y: 272, tile_stride_x: 144, tile_stride_y: 128 },
+      class_type: "LTXVScheduler",
+      inputs: {
+        steps, max_shift: 2.05, base_shift: 0.95,
+        stretch: true, terminal: 0.1, latent: ["6", 2],
+      },
     },
     "9": {
-      class_type: "VHS_VideoCombine",
-      inputs: { images: ["8", 0], frame_rate: FPS, loop_count: 0, format: "video/h264-mp4", pingpong: false, save_output: true, filename_prefix: prefix },
+      class_type: "RandomNoise",
+      inputs: { noise_seed: seed },
     },
-  };
-}
-
-// ══════════════════════════════════════════════════════════════════════
-// WORKFLOW 4: Wan 2.1 Text-to-Video (T2V 1.3B) — fallback when I2V not available
-// The T2V 1.3B model does NOT support image conditioning.
-// Used when wan2.1-i2v-14b-480p-fp8.safetensors is not downloaded yet.
-// ══════════════════════════════════════════════════════════════════════
-export function buildWan2_1_I2VWorkflow(
-  prompt: string,
-  _imageName: string, // kept for API compat — not used by T2V model
-  seed: number,
-  durationFrames: number = 81, // 81 frames ≈ 3 sec at ~24fps (must be divisible by 4 +1)
-  _modelOverride?: string | null
-) {
-  const prefix = `studio/wan2v_${Date.now()}`;
-  // Cap at 97 frames (~6s) and clamp to WanVideo divisibility rule
-  const clampedFrames = Math.min(durationFrames, 97);
-  const frames = Math.max(5, Math.round((clampedFrames - 1) / 4) * 4 + 1);
-
-  return {
-    // 1. Load Wan 2.1 T2V 1.3B model from diffusion_models folder
-    "1": {
-      class_type: "WanVideoModelLoader",
+    "10": {
+      class_type: "KSamplerSelect",
+      inputs: { sampler_name: "euler" },
+    },
+    "11": {
+      class_type: "CFGGuider",
+      inputs: { model: ["1", 0], positive: ["7", 0], negative: ["7", 1], cfg },
+    },
+    "12": {
+      class_type: "SamplerCustom",
       inputs: {
-        model: "wan2.1-t2v-1.3b-fp16.safetensors",
-        base_precision: "fp16",
-        quantization: "disabled",
-        load_device: "offload_device",
+        add_noise: true, noise_seed: seed, cfg,
+        model: ["1", 0], positive: ["7", 0], negative: ["7", 1],
+        sampler: ["10", 0], sigmas: ["8", 0], latent_image: ["6", 2],
       },
     },
-    // 2. Load T5 text encoder
-    "2": {
-      class_type: "LoadWanVideoT5TextEncoder",
-      inputs: {
-        model_name: "umt5-xxl-fp16.safetensors",
-        precision: "bf16",
-        quantization: "disabled",
-        load_device: "offload_device",
-      },
+    "13": {
+      class_type: "VAEDecode",
+      inputs: { samples: ["12", 0], vae: ["1", 2] },
     },
-    // 3. Load VAE
-    "3": {
-      class_type: "WanVideoVAELoader",
-      inputs: {
-        model_name: "wan_2.1_vae.safetensors",
-        precision: "bf16",
-        load_device: "offload_device",
-      },
+    // LTX pods use native ComfyUI video nodes (no VideoHelperSuite dependency)
+    "14": {
+      class_type: "CreateVideo",
+      inputs: { images: ["13", 0], fps: FPS },
     },
-    // 4. Encode text prompt via T5
-    "4": {
-      class_type: "WanVideoTextEncode",
-      inputs: {
-        positive_prompt: prompt,
-        negative_prompt: "static image, no motion, blurry, low quality, worst quality",
-        t5: ["2", 0],
-        force_offload: false,
-        model_to_offload: ["1", 0],
-      },
-    },
-    // 5. Empty image embeds — T2V model, no image conditioning
-    "5": {
-      class_type: "WanVideoEmptyEmbeds",
-      inputs: {
-        width: 832,
-        height: 480,
-        num_frames: frames,
-      },
-    },
-    // 6. Sample video latents
-    "6": {
-      class_type: "WanVideoSampler",
-      inputs: {
-        model: ["1", 0],
-        image_embeds: ["5", 0],
-        text_embeds: ["4", 0],
-        steps: 15,
-        cfg: 6.0,
-        shift: 5.0,
-        seed,
-        force_offload: false,
-        scheduler: "unipc",
-        riflex_freq_index: 0,
-      },
-    },
-    // 7. Decode latents to video frames
-    "7": {
-      class_type: "WanVideoDecode",
-      inputs: {
-        vae: ["3", 0],
-        samples: ["6", 0],
-        enable_vae_tiling: true,
-        tile_x: 272,
-        tile_y: 272,
-        tile_stride_x: 144,
-        tile_stride_y: 128,
-      },
-    },
-    // 8. Combine frames into MP4 video
-    "8": {
-      class_type: "VHS_VideoCombine",
-      inputs: {
-        images: ["7", 0],
-        frame_rate: 16,
-        loop_count: 0,
-        format: "video/h264-mp4",
-        pingpong: false,
-        save_output: true,
-        filename_prefix: prefix,
-      },
+    "15": {
+      class_type: "SaveVideo",
+      inputs: { video: ["14", 0], filename_prefix: prefix, format: "mp4", codec: "h264" },
     },
   };
 }

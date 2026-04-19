@@ -1,6 +1,7 @@
 import { spawn } from 'child_process';
 import * as fs from 'fs';
 import * as path from 'path';
+import { uploadGeneratedFromDisk } from './storage';
 
 // Binaries can be overridden via env. Useful on macOS where the stock Homebrew
 // `ffmpeg` bottle omits `libfreetype` (no drawtext filter) — set FFMPEG_PATH
@@ -110,6 +111,8 @@ export async function mergeAudioVideo(
 
       // Return URL path relative to public/ so Next.js can serve it
       const relativePath = "/" + path.relative(path.join(process.cwd(), "public"), outputPath).replace(/\\/g, "/");
+      // Mirror to DO Spaces so other hosts (prod → dev, across restarts) can fetch it.
+      uploadGeneratedFromDisk(relativePath).catch(() => { /* non-fatal */ });
       resolve(relativePath);
     });
 
@@ -424,31 +427,41 @@ async function preprocessClip(
   if (motionEffects.has(effect as ClipEffect)) {
     const oversample = 1.2;                  // 20% bigger than canvas
     const panScale   = 1.18;                 // scale used for pan effects
-    const zoomStart  = 1.0;
-    const zoomEnd    = 1.15;
+    const dur        = dSec.toFixed(3);
 
-    // For zoom effects we use zoompan (simpler). For pans we use scale+crop
-    // with an animated x/y. Shake uses scale+crop with sinusoidal jitter.
+    // Zoom/ken-burns use a time-varying crop window + rescale, which works on
+    // both still-image-derived clips and real video. (zoompan only samples the
+    // first frame of a video stream, so it would freeze motion.)
     if (effect === "ken-burns") {
-      const frames = Math.max(1, Math.round(dSec * fps));
-      vf.push(`zoompan=z='min(zoom+0.0010,1.10)':d=${frames}:s=${width}x${height}:fps=${fps}`);
+      // Slow zoom-in 1.00 → 1.15 + gentle horizontal drift across the slack.
+      const zExpr = `(1+0.15*t/${dur})`;
+      vf.push(
+        `crop=w='${width}/${zExpr}':h='${height}/${zExpr}'` +
+        `:x='(in_w-out_w)*(0.35+0.30*t/${dur})':y='(in_h-out_h)/2'`,
+      );
+      vf.push(`scale=${width}:${height}:flags=lanczos`);
     } else if (effect === "zoom-in") {
-      const frames = Math.max(1, Math.round(dSec * fps));
-      const rate = ((zoomEnd - zoomStart) / frames).toFixed(5);
-      vf.push(`zoompan=z='min(zoom+${rate},${zoomEnd})':x='iw/2-(iw/zoom/2)':y='ih/2-(ih/zoom/2)':d=${frames}:s=${width}x${height}:fps=${fps}`);
+      // Crop shrinks 1.00 → 1.20, re-scaled to target = apparent zoom-in.
+      const zExpr = `(1+0.20*t/${dur})`;
+      vf.push(
+        `crop=w='${width}/${zExpr}':h='${height}/${zExpr}'` +
+        `:x='(in_w-out_w)/2':y='(in_h-out_h)/2'`,
+      );
+      vf.push(`scale=${width}:${height}:flags=lanczos`);
     } else if (effect === "zoom-out") {
-      const frames = Math.max(1, Math.round(dSec * fps));
-      const rate = ((zoomEnd - zoomStart) / frames).toFixed(5);
-      // Start at zoomEnd and ramp toward zoomStart. zoompan's `zoom` variable
-      // can't go below 1, so we invert: `max(zoom-rate, 1)` and seed with `zoomEnd`.
-      vf.push(`zoompan=z='if(eq(on,0),${zoomEnd},max(zoom-${rate},${zoomStart}))':x='iw/2-(iw/zoom/2)':y='ih/2-(ih/zoom/2)':d=${frames}:s=${width}x${height}:fps=${fps}`);
+      // Crop grows 1.20 → 1.00, re-scaled to target = apparent pull-back.
+      const zExpr = `(1.20-0.20*t/${dur})`;
+      vf.push(
+        `crop=w='${width}/${zExpr}':h='${height}/${zExpr}'` +
+        `:x='(in_w-out_w)/2':y='(in_h-out_h)/2'`,
+      );
+      vf.push(`scale=${width}:${height}:flags=lanczos`);
     } else if (effect.startsWith("pan-")) {
       // Scale oversized, then crop the viewport along an axis.
       const sW = Math.round(width * panScale);
       const sH = Math.round(height * panScale);
       vf.push(`scale=${sW}:${sH}:force_original_aspect_ratio=decrease`);
       vf.push(`pad=${sW}:${sH}:(ow-iw)/2:(oh-ih)/2:color=black`);
-      const dur = dSec.toFixed(3);
       let x: string, y: string;
       if (effect === "pan-left") {
         // start on the right edge, end on the left edge
@@ -561,6 +574,47 @@ async function preprocessClip(
 
   const realDur = await ffprobeDurationSync(outPath).catch(() => dMs);
   return { path: outPath, durationMs: realDur };
+}
+
+/**
+ * Mux a video file together with a separate audio track, writing to an explicit
+ * output path. Used by the final-video pipeline when a shot has raw video and
+ * raw TTS audio but no pre-merged `video_audio_path` on disk. Video stream is
+ * stream-copied (fast); audio is re-encoded to AAC. `-shortest` so we don't pad.
+ */
+export async function muxVideoWithAudio(
+  videoPath: string,
+  audioPath: string,
+  outputPath: string,
+): Promise<string> {
+  if (!fs.existsSync(videoPath)) throw new Error(`Video not found: ${videoPath}`);
+  if (!fs.existsSync(audioPath)) throw new Error(`Audio not found: ${audioPath}`);
+
+  const args = [
+    "-y",
+    "-i", videoPath,
+    "-i", audioPath,
+    "-map", "0:v:0",
+    "-map", "1:a:0",
+    "-c:v", "copy",
+    "-c:a", "aac",
+    "-b:a", "192k",
+    "-ar", "48000",
+    "-ac", "2",
+    "-shortest",
+    "-movflags", "+faststart",
+    outputPath,
+  ];
+
+  await new Promise<void>((resolve, reject) => {
+    const proc = spawn(FFMPEG_BIN, args);
+    let stderr = "";
+    proc.stderr.on("data", (d) => { stderr += d.toString(); });
+    proc.on("close", (code) => code === 0 ? resolve() : reject(new Error(`muxVideoWithAudio exit ${code}: ${stderr.slice(-500)}`)));
+    proc.on("error", reject);
+  });
+
+  return outputPath;
 }
 
 /**

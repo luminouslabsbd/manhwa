@@ -40,7 +40,7 @@ type ApiData = {
   renders: RenderRow[];
 };
 
-type ClipSource = "shot_video_with_audio" | "shot_video" | "shot_image" | "custom";
+type ClipSource = "shot_video" | "shot_image" | "custom";
 type ClipEffect =
   | "none"
   | "fade-in"
@@ -60,6 +60,7 @@ type TimelineClip = {
   key: string;             // UI-only stable key
   shot_id?: string;
   source: ClipSource;
+  tts: boolean;            // mix the shot's TTS track into this clip (ignored if shot has no TTS)
   custom_video_url?: string;
   custom_label?: string;
   include: boolean;
@@ -127,7 +128,18 @@ export default function FinalVideoPage() {
     if (typeof window === "undefined") return {};
     try {
       const raw = window.localStorage.getItem(storageKey);
-      return raw ? JSON.parse(raw) as Persisted : {};
+      if (!raw) return {};
+      const parsed = JSON.parse(raw) as Persisted;
+      // Migrate old "shot_video_with_audio" source → { source: "shot_video", tts: true }.
+      if (parsed.clips) {
+        parsed.clips = parsed.clips.map((c) => {
+          const legacySource = (c as { source?: string }).source;
+          if (legacySource === "shot_video_with_audio") return { ...c, source: "shot_video" as ClipSource, tts: true };
+          if (c.tts == null) return { ...c, tts: legacySource !== "custom" };
+          return c;
+        });
+      }
+      return parsed;
     } catch { return {}; }
   })();
 
@@ -164,11 +176,8 @@ export default function FinalVideoPage() {
         .map<TimelineClip>((s) => ({
           key: uid(),
           shot_id: s.id,
-          source: s.video_audio_path
-            ? "shot_video_with_audio"
-            : s.has_video
-              ? "shot_video"
-              : "shot_image",
+          source: s.has_video ? "shot_video" : "shot_image",
+          tts: s.has_tts,
           include: true,
           duration_ms: undefined,
           effect: "none",
@@ -211,6 +220,7 @@ export default function FinalVideoPage() {
     const newClip: TimelineClip = {
       key: uid(),
       source: "custom",
+      tts: false,
       custom_video_url: url.trim(),
       custom_label: label.trim() || "Custom clip",
       include: true,
@@ -228,22 +238,24 @@ export default function FinalVideoPage() {
       return copy;
     });
   }
-  function resetFromShots() {
-    if (!data) return;
-    setClips(data.shots.filter((s) => s.ready).map<TimelineClip>((s) => ({
+  async function resetFromShots() {
+    // Always pull fresh data — the cached SWR response may be stale
+    // (e.g. has_video flipped true on the server but our cache says false).
+    const fresh = await mutate();
+    const src = fresh ?? data;
+    if (!src) return;
+    setClips(src.shots.filter((s) => s.ready).map<TimelineClip>((s) => ({
       key: uid(),
       shot_id: s.id,
-      source: s.video_audio_path
-        ? "shot_video_with_audio"
-        : s.has_video
-          ? "shot_video"
-          : "shot_image",
+      source: s.has_video ? "shot_video" : "shot_image",
+      tts: s.has_tts,
       include: true,
       duration_ms: undefined,
       effect: "none",
       transition: "cut",
       transition_ms: 500,
     })));
+    toast(`Reseeded ${src.shots.filter((s) => s.ready).length} clips from shots`, "success");
   }
 
   const includedClips = clips.filter((c) => c.include);
@@ -278,6 +290,7 @@ export default function FinalVideoPage() {
         clips: includedClips.map((c) => ({
           shot_id: c.shot_id,
           source: c.source,
+          tts: c.tts,
           custom_video_url: c.source === "custom" ? c.custom_video_url : undefined,
           duration_ms: c.duration_ms,
           effect: c.effect,
@@ -290,9 +303,17 @@ export default function FinalVideoPage() {
         headers: { "Content-Type": "application/json" },
         body: JSON.stringify(body),
       });
-      const j = await res.json();
+      const j = await res.json() as { ok?: boolean; error?: string; warnings?: string[] };
       if (!res.ok) { toast(j.error ?? "Render failed", "error"); }
-      else { toast("Final video rendered", "success"); mutate(); }
+      else {
+        if (j.warnings?.length) {
+          toast(`Final video rendered with ${j.warnings.length} warning${j.warnings.length > 1 ? "s" : ""}`, "warning");
+          console.warn("[final-video] warnings:", j.warnings);
+        } else {
+          toast("Final video rendered", "success");
+        }
+        mutate();
+      }
     } catch (err) {
       toast(err instanceof Error ? err.message : "Render failed", "error");
     } finally {
@@ -318,7 +339,8 @@ export default function FinalVideoPage() {
         const source = prev.length > 0 ? prev : (data.shots.filter((s) => s.ready).map<TimelineClip>((s) => ({
           key: uid(),
           shot_id: s.id,
-          source: s.video_audio_path ? "shot_video_with_audio" : s.has_video ? "shot_video" : "shot_image",
+          source: s.has_video ? "shot_video" : "shot_image",
+          tts: s.has_tts,
           include: true,
           duration_ms: undefined,
           effect: "none",
@@ -582,9 +604,8 @@ export default function FinalVideoPage() {
                         Include
                       </label>
                       {shot?.character && <span style={{ fontSize: 11, color: "#60a5fa", fontWeight: 700 }}>{shot.character}</span>}
-                      {c.source === "shot_video_with_audio" && <span style={{ fontSize: 10, padding: "1px 6px", borderRadius: 4, background: "rgba(52,211,153,.15)", color: "#34d399", fontWeight: 700 }}>+ TTS</span>}
-                      {c.source === "shot_image" && shot?.has_tts && <span style={{ fontSize: 10, padding: "1px 6px", borderRadius: 4, background: "rgba(52,211,153,.15)", color: "#34d399", fontWeight: 700 }}>+ TTS</span>}
-                      {c.source === "shot_image" && !shot?.has_tts && <span style={{ fontSize: 10, padding: "1px 6px", borderRadius: 4, background: "rgba(255,255,255,.06)", color: "var(--muted)", fontWeight: 700 }}>silent</span>}
+                      {c.source !== "custom" && c.tts && shot?.has_tts && <span style={{ fontSize: 10, padding: "1px 6px", borderRadius: 4, background: "rgba(52,211,153,.15)", color: "#34d399", fontWeight: 700 }}>+ TTS</span>}
+                      {c.source !== "custom" && !c.tts && <span style={{ fontSize: 10, padding: "1px 6px", borderRadius: 4, background: "rgba(255,255,255,.06)", color: "var(--muted)", fontWeight: 700 }}>silent</span>}
                       <div style={{ marginLeft: "auto", display: "flex", gap: 4 }}>
                         <button onClick={() => moveClip(c.key, -1)} disabled={i === 0} className="btn btn-secondary btn-xs">▲</button>
                         <button onClick={() => moveClip(c.key, 1)} disabled={i === clips.length - 1} className="btn btn-secondary btn-xs">▼</button>
@@ -599,12 +620,11 @@ export default function FinalVideoPage() {
                     )}
 
                     <div style={{ display: "flex", gap: 10, flexWrap: "wrap", alignItems: "center", fontSize: 11, marginTop: "auto" }}>
-                      {/* Source switch (shot clips) — only when there's more than one option */}
+                      {/* Source switch (shot clips) — Video | Image; hidden if only one is available. */}
                       {c.source !== "custom" && shot && (() => {
                         const opts: { v: ClipSource; label: string }[] = [];
-                        if (shot.video_audio_path) opts.push({ v: "shot_video_with_audio", label: "Video + TTS" });
-                        if (shot.has_video) opts.push({ v: "shot_video", label: "Video only" });
-                        if (shot.has_image) opts.push({ v: "shot_image", label: shot.has_tts ? "Image + TTS" : "Image only" });
+                        if (shot.has_video) opts.push({ v: "shot_video", label: "Video" });
+                        if (shot.has_image) opts.push({ v: "shot_image", label: "Image" });
                         if (opts.length < 2) return null;
                         return (
                           <label style={{ display: "flex", alignItems: "center", gap: 4 }}>
@@ -618,6 +638,25 @@ export default function FinalVideoPage() {
                           </label>
                         );
                       })()}
+
+                      {/* TTS toggle — disabled when the shot has no TTS track. */}
+                      {c.source !== "custom" && (
+                        <label
+                          style={{
+                            display: "flex", alignItems: "center", gap: 4,
+                            opacity: shot?.has_tts ? 1 : 0.4,
+                            cursor: shot?.has_tts ? "pointer" : "not-allowed",
+                          }}
+                          title={shot?.has_tts ? "Mix the TTS track into this clip" : "This shot has no TTS audio"}>
+                          <input
+                            type="checkbox"
+                            checked={!!c.tts && !!shot?.has_tts}
+                            disabled={!shot?.has_tts}
+                            onChange={(e) => patchClip(c.key, { tts: e.target.checked })}
+                          />
+                          <span style={{ color: "var(--muted)" }}>TTS</span>
+                        </label>
+                      )}
 
                       {/* Duration override */}
                       <label style={{ display: "flex", alignItems: "center", gap: 4 }}>

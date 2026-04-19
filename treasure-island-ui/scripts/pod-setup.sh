@@ -31,7 +31,7 @@ OLLAMA_MODEL="${OLLAMA_MODEL:-qwen2.5:7b}"
 #   INSTALL_OLLAMA   — Ollama binary + model pull (port 11434)
 #   INSTALL_SDXL     — SDXL checkpoints: animagine, juggernaut (~10 GB)
 #   INSTALL_FLUX     — FLUX.1-schnell + CLIPs + AE VAE (~20 GB)
-#   INSTALL_VIDEO    — Wan 2.1 t2v/i2v + umt5 + wan vae (~20 GB)
+#   INSTALL_VIDEO    — LTX Video 13B 0.9.7 distilled + t5xxl fp16 (~37 GB)
 INSTALL_COMFYUI="${INSTALL_COMFYUI:-1}"
 INSTALL_TTS="${INSTALL_TTS:-1}"
 INSTALL_OLLAMA="${INSTALL_OLLAMA:-1}"
@@ -66,8 +66,9 @@ detect_torch_cu() { echo "cu128"; }
 
 # Pinned torch trio — all three MUST share the same +cuXXX local-version suffix
 # or torchaudio fails to load libtorchaudio.so (CUDA mismatch), which in turn
-# breaks ComfyUI-WanVideoWrapper's import and silently drops video generation
-# back to plain SDXL img2img. We saw this in prod on 2026-04-18.
+# breaks any video custom node's import (previously ComfyUI-WanVideoWrapper,
+# now ComfyUI-LTXVideo) and silently drops video generation back to plain
+# SDXL img2img. We saw this in prod on 2026-04-18.
 TORCH_VER="2.7.1"
 TORCHVISION_VER="0.22.1"
 TORCHAUDIO_VER="2.7.1"
@@ -106,9 +107,9 @@ fi
 #
 # CRITICAL: torch + torchvision + torchaudio must ALL share the same +cuXXX
 # local-version suffix. If torchaudio ends up on a different cu than torch,
-# libtorchaudio.so fails to load → WanVideoWrapper import dies → video silently
-# falls back to SDXL img2img. `--force-reinstall --no-deps` guarantees the
-# trio stays in sync even if a later step (custom-node requirements) tries
+# libtorchaudio.so fails to load → video custom node import dies → video
+# silently falls back to SDXL img2img. `--force-reinstall --no-deps` guarantees
+# the trio stays in sync even if a later step (custom-node requirements) tries
 # to "upgrade" torch.
 torch_trio_ok() {
   "$PY" - <<'PYEOF' 2>/dev/null
@@ -207,7 +208,7 @@ if [ "$INSTALL_COMFYUI" = "1" ]; then
 
   # Re-pin the full torch trio if requirements or custom nodes have touched it.
   # Test BOTH: the +cuXXX suffix matches AND all three libs agree (else
-  # libtorchaudio.so would fail to load and break WanVideoWrapper).
+  # libtorchaudio.so would fail to load and break the video custom node).
   # WITH deps: ensures nvidia-cudnn/cusparselt/etc. match if they were replaced.
   if ! torch_trio_ok || ! "$PY" -c "import torch; import sys; sys.exit(0 if '${TORCH_CU#cu}' in torch.__version__ else 1)" 2>/dev/null; then
     CURRENT_TORCH=$("$PY" -c "import torch; print(torch.__version__)" 2>/dev/null || echo "none")
@@ -267,9 +268,9 @@ if [ "$INSTALL_COMFYUI" = "1" ]; then
       fi
     fi
   }
-  # VideoHelperSuite + WanVideoWrapper only needed for video generation
+  # VideoHelperSuite always; LTX-Video custom node only when video selected
   install_node "https://github.com/Kosinkadink/ComfyUI-VideoHelperSuite"
-  [ "$INSTALL_VIDEO" = "1" ] && install_node "https://github.com/kijai/ComfyUI-WanVideoWrapper"
+  [ "$INSTALL_VIDEO" = "1" ] && install_node "https://github.com/Lightricks/ComfyUI-LTXVideo"
 fi
 
 # ── 7. ComfyUI extra_model_paths.yaml → /workspace/models ────────────────────
@@ -477,10 +478,8 @@ check_model() {
   else log "  ✗ $label  (missing — will download)"; fi
 }
 if [ "$INSTALL_VIDEO" = "1" ]; then
-  check_model "wan2.1-t2v-1.3b"         "$DL/diffusion_models/wan2.1-t2v-1.3b-fp16.safetensors"    2000000000
-  check_model "wan2.1-i2v-14b-480p-fp8" "$DL/diffusion_models/wan2.1-i2v-14b-480p-fp8.safetensors" 8000000000
-  check_model "umt5-xxl-fp16"           "$DL/text_encoders/umt5-xxl-fp16.safetensors"               9000000000
-  check_model "wan_2.1_vae"             "$DL/vae/wan_2.1_vae.safetensors"                           200000000
+  check_model "ltxv-13b-0.9.7-distilled" "$DL/checkpoints/ltxv-13b-0.9.7-distilled.safetensors"     20000000000
+  check_model "t5xxl_fp16"               "$DL/text_encoders/t5xxl_fp16.safetensors"                  9000000000
 fi
 if [ "$INSTALL_SDXL" = "1" ]; then
   check_model "animagineXL31"           "$DL/checkpoints/animagineXL31.safetensors"                 5000000000
@@ -499,21 +498,16 @@ if [ "$INSTALL_VIDEO" = "1" ] || [ "$INSTALL_SDXL" = "1" ] || [ "$INSTALL_FLUX" 
   log "Starting model downloads in background..."
 
   if [ "$INSTALL_VIDEO" = "1" ]; then
-    hf_download "Comfy-Org/Wan_2.1_ComfyUI_repackaged" \
-      "split_files/diffusion_models/wan2.1_t2v_1.3B_fp16.safetensors" \
-      "$DL/diffusion_models/wan2.1-t2v-1.3b-fp16.safetensors" 2000000000 &
+    # LTX Video 13B 0.9.7 distilled — single-file checkpoint (includes VAE).
+    # Loaded via CheckpointLoaderSimple from checkpoints/.
+    hf_download "Lightricks/LTX-Video" \
+      "ltxv-13b-0.9.7-distilled.safetensors" \
+      "$DL/checkpoints/ltxv-13b-0.9.7-distilled.safetensors" 20000000000 &
 
-    hf_download "Comfy-Org/Wan_2.1_ComfyUI_repackaged" \
-      "split_files/diffusion_models/wan2.1_i2v_480p_14B_fp8_e4m3fn.safetensors" \
-      "$DL/diffusion_models/wan2.1-i2v-14b-480p-fp8.safetensors" 8000000000 &
-
-    hf_download "Comfy-Org/Wan_2.1_ComfyUI_repackaged" \
-      "split_files/text_encoders/umt5_xxl_fp16.safetensors" \
-      "$DL/text_encoders/umt5-xxl-fp16.safetensors" 9000000000 &
-
-    hf_download "Comfy-Org/Wan_2.1_ComfyUI_repackaged" \
-      "split_files/vae/wan_2.1_vae.safetensors" \
-      "$DL/vae/wan_2.1_vae.safetensors" 200000000 &
+    # T5-XXL fp16 text encoder (shared with FLUX; downloaded here when only VIDEO is on)
+    hf_download "comfyanonymous/flux_text_encoders" \
+      "t5xxl_fp16.safetensors" \
+      "$DL/text_encoders/t5xxl_fp16.safetensors" 9000000000 &
   fi
 
   if [ "$INSTALL_SDXL" = "1" ]; then

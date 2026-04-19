@@ -15,9 +15,12 @@ export async function POST(req: Request, { params }: { params: Promise<{ id: str
     await prisma.shot.update({ where: { id }, data: { approved_tts_id: newTts } });
     return Response.json({ ok: true });
 
-  } else if (gen.type === "video") {
-    await prisma.shot.update({ where: { id }, data: { approved_video_id: generation_id, status: "video_done" } });
-    return Response.json({ ok: true });
+  } else if (gen.type === "video" || gen.type.startsWith("video:")) {
+    const isAlready = shot.approved_video_id === generation_id;
+    const newApproved = isAlready ? null : generation_id;
+    const newStatus = isAlready ? (shot.approved_image_id ? "approved" : "done") : "video_done";
+    await prisma.shot.update({ where: { id }, data: { approved_video_id: newApproved, status: newStatus } });
+    return Response.json({ ok: true, approved_video_id: newApproved });
 
   } else {
     // Image approval is single-select: approving replaces any previous approval,

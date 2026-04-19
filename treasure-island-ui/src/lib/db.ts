@@ -26,7 +26,9 @@ export type Shot = {
   video_audio_path?: string | null;
   prompt_template_id?: string | null;
   interaction_type?: string | null;
+  location_id?: string | null;
 };
+export type Location = { id: string; project_id: string; name: string; description: string; reference_image: string | null; created_at: string };
 export type Generation = { id: string; shot_id: string; type: string; comfyui_prompt_id: string | null; status: string; seed: number | null; image_path: string | null; video_path: string | null; audio_path?: string | null; voice?: string | null; error: string | null; ref_image?: string | null; created_at: string; completed_at: string | null };
 export type Character = { id: string; project_id: string; name: string; description: string; appearance: string; role: string; reference_prompt: string; reference_image: string | null; seed: number | null; status: string; created_at: string; pipeline_model?: string | null };
 
