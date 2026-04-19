@@ -1,13 +1,11 @@
 import { prisma } from "@/lib/prisma";
-import { queuePrompt, buildWan2_1_I2VWorkflow_14B, buildWan2_1_I2VWorkflow, uploadImage, getHost } from "@/lib/comfyui";
+import { queuePrompt, buildWan2_1_I2VWorkflow_14B, buildWan2_1_I2VWorkflow, uploadImage, getVideoHost } from "@/lib/comfyui";
+import { fetchGenerated } from "@/lib/storage";
 import { randomUUID } from "crypto";
-import fs from "fs";
-import path from "path";
 
 // Read WAV header to estimate duration in milliseconds (no ffprobe needed)
-function wavDurationMs(absPath: string): number {
+function wavDurationMs(buf: Buffer): number {
   try {
-    const buf = fs.readFileSync(absPath);
     if (buf.length < 44) return 0;
     const dataSize = buf.readUInt32LE(40);
     const sampleRate = buf.readUInt32LE(24);
@@ -42,7 +40,7 @@ export async function POST(_: Request, { params }: { params: Promise<{ id: strin
   });
   if (!shots.length) return Response.json({ ok: true, queued: 0, message: "No shots ready for video" });
 
-  const host = getHost();
+  const host = getVideoHost();
   let queued = 0;
   const errors: string[] = [];
 
@@ -57,19 +55,23 @@ export async function POST(_: Request, { params }: { params: Promise<{ id: strin
       const approvedGen = await prisma.generation.findUnique({ where: { id: shot.approved_image_id! } });
       if (!approvedGen?.image_path) { errors.push(`Shot ${shot.shot_number}: No image path`); continue; }
 
-      const absPath = path.join(process.cwd(), "public", approvedGen.image_path.replace(/^\//, ""));
-      if (!fs.existsSync(absPath)) { errors.push(`Shot ${shot.shot_number}: Image file missing`); continue; }
+      let imgBuffer: Buffer;
+      try {
+        imgBuffer = await fetchGenerated(approvedGen.image_path);
+      } catch (e) {
+        errors.push(`Shot ${shot.shot_number}: ${e instanceof Error ? e.message : String(e)}`);
+        continue;
+      }
 
       let durationFrames = 144;
       if (shot.audio_path) {
-        const audioAbsPath = path.join(process.cwd(), "public", shot.audio_path.replace(/^\//, ""));
-        if (fs.existsSync(audioAbsPath)) {
-          const ms = wavDurationMs(audioAbsPath);
+        try {
+          const audioBuf = await fetchGenerated(shot.audio_path);
+          const ms = wavDurationMs(audioBuf);
           if (ms > 500) durationFrames = framesFromMs(ms);
-        }
+        } catch { /* keep default */ }
       }
 
-      const imgBuffer = fs.readFileSync(absPath);
       const imgName = `shot_${shot.id}.png`;
       const uploadData = await uploadImage(imgBuffer, imgName, host);
       const seed = Math.floor(Math.random() * 999999);

@@ -22,13 +22,35 @@ type LightboxItem = {
 
 const TTS_VOICES = ["default", "female_1", "female_2", "male_1", "male_2", "child"];
 
-function Lightbox({ items, index, onClose, onPrev, onNext, onJump, onApprove, onDelete, onApproveVideo, onGenerateVideo, onDeleteGen, onRegenerate, onGenerateAllModels, onUploadImage, onBulkDelete, onGenerateImage, onGenerateTTS }: {
+type VideoEffectId =
+  | "none" | "fade-in" | "fade-out" | "fade-both"
+  | "ken-burns" | "zoom-in" | "zoom-out"
+  | "pan-left" | "pan-right" | "pan-up" | "pan-down"
+  | "shake";
+
+const VIDEO_EFFECTS: Array<{ id: VideoEffectId; label: string; emoji: string; tagline: string }> = [
+  { id: "none",      label: "None",       emoji: "▫️", tagline: "Static" },
+  { id: "fade-in",   label: "Fade in",    emoji: "🌅", tagline: "Up from black" },
+  { id: "fade-out",  label: "Fade out",   emoji: "🌇", tagline: "Down to black" },
+  { id: "fade-both", label: "Fade both",  emoji: "🕯",  tagline: "In and out" },
+  { id: "ken-burns", label: "Ken Burns",  emoji: "🖼",  tagline: "Gentle zoom" },
+  { id: "zoom-in",   label: "Zoom in",    emoji: "🔎", tagline: "Push in" },
+  { id: "zoom-out",  label: "Zoom out",   emoji: "🔭", tagline: "Pull back" },
+  { id: "pan-left",  label: "Pan left",   emoji: "⬅️", tagline: "Right → left" },
+  { id: "pan-right", label: "Pan right",  emoji: "➡️", tagline: "Left → right" },
+  { id: "pan-up",    label: "Pan up",     emoji: "⬆️", tagline: "Tilt upward" },
+  { id: "pan-down",  label: "Pan down",   emoji: "⬇️", tagline: "Tilt downward" },
+  { id: "shake",     label: "Shake",      emoji: "💥", tagline: "Handheld jitter" },
+];
+
+function Lightbox({ items, index, onClose, onPrev, onNext, onJump, onApprove, onDelete, onApproveVideo, onGenerateVideo, onRenderVideoEffect, onDeleteGen, onRegenerate, onGenerateAllModels, onUploadImage, onBulkDelete, onGenerateImage, onGenerateTTS }: {
   items: LightboxItem[]; index: number;
   onClose: () => void; onPrev: () => void; onNext: () => void; onJump: (i: number) => void;
   onApprove: (genId: string, shotId: string) => void;
   onDelete: (genId: string) => void;
   onApproveVideo: (genId: string, shotId: string) => void;
   onGenerateVideo: (shotId: string, preset: string) => void;
+  onRenderVideoEffect: (shotId: string, effect: VideoEffectId) => Promise<void>;
   onDeleteGen: (genId: string) => void;
   onRegenerate: (shotId: string, model: string | undefined) => void;
   onGenerateAllModels: (shotId: string) => void;
@@ -46,8 +68,9 @@ function Lightbox({ items, index, onClose, onPrev, onNext, onJump, onApprove, on
   const [ttsLoading, setTtsLoading] = useState(false);
   const [imgGenerating, setImgGenerating] = useState(false);
   const [videoGenerating, setVideoGenerating] = useState(false);
+  const [effectsRendering, setEffectsRendering] = useState<Set<VideoEffectId>>(new Set());
   const [extraTtsGens, setExtraTtsGens] = useState<Generation[]>([]);
-  useEffect(() => { setExtraTtsGens([]); setVideoGenerating(false); }, [item.shotId]);
+  useEffect(() => { setExtraTtsGens([]); setVideoGenerating(false); setEffectsRendering(new Set()); }, [item.shotId]);
   const uploadRef = useRef<HTMLInputElement | null>(null);
 
   function parseGenType(type: string): { model: string | null; frameId: string | null } {
@@ -103,7 +126,7 @@ function Lightbox({ items, index, onClose, onPrev, onNext, onJump, onApprove, on
               images: { icon: "🖼", label: "Images", count: items.length, activeColor: "#60a5fa" },
               video:  { icon: "🎬", label: "Video",  count: videoGens.length, activeColor: "#a78bfa" },
               tts:    { icon: "🎙", label: "TTS",    count: ttsGens.length,   activeColor: "#34d399" },
-              log:    { icon: "📋", label: "Pipeline Log", count: imageGens.length, activeColor: "#fb923c" },
+              log:    { icon: "📋", label: "Pipeline Log", count: imageGens.length + videoGens.length, activeColor: "#fb923c" },
             }[tab];
             const isActive = activeTab === tab;
             return (
@@ -402,10 +425,11 @@ function Lightbox({ items, index, onClose, onPrev, onNext, onJump, onApprove, on
                   const isSel = i === selectedVideoIdx;
                   const isApproved = g.id === item.approvedVideoId;
                   const isRunning = g.status === "running" || g.status === "video_generating";
+                  const isFailed = g.status === "failed";
                   return (
-                    <button key={g.id} onClick={() => setSelectedVideoIdx(i)} style={{
+                    <button key={g.id} onClick={() => setSelectedVideoIdx(i)} title={isFailed ? (g.error ?? "Generation failed") : undefined} style={{
                       flexShrink: 0, width: "100%", aspectRatio: "16/9", borderRadius: 6, overflow: "hidden", padding: 0, cursor: "pointer",
-                      border: isSel ? "2px solid #a78bfa" : isApproved ? "2px solid #7c3aed" : "2px solid rgba(255,255,255,.1)",
+                      border: isSel ? "2px solid #a78bfa" : isApproved ? "2px solid #7c3aed" : isFailed ? "2px solid rgba(239,68,68,.55)" : "2px solid rgba(255,255,255,.1)",
                       boxShadow: isSel ? "0 0 0 2px rgba(167,139,250,.3)" : "none",
                       opacity: isSel ? 1 : 0.55, transition: "all .15s", background: "#000", position: "relative",
                     }}>
@@ -413,9 +437,9 @@ function Lightbox({ items, index, onClose, onPrev, onNext, onJump, onApprove, on
                         ? <div style={{ width: "100%", height: "100%", display: "flex", alignItems: "center", justifyContent: "center", background: "rgba(124,58,237,.15)" }}><span className="spinner" style={{ width: 16, height: 16, borderWidth: 2, borderColor: "#7c3aed transparent transparent transparent" }} /></div>
                         : g.video_path
                           ? <video src={g.video_path} style={{ width: "100%", height: "100%", objectFit: "cover", display: "block" }} muted />
-                          : <div style={{ width: "100%", height: "100%", display: "flex", alignItems: "center", justifyContent: "center", color: "#f87171", fontSize: 13 }}>✗</div>}
+                          : <div style={{ width: "100%", height: "100%", display: "flex", alignItems: "center", justifyContent: "center", color: "#f87171", fontSize: 16, background: isFailed ? "rgba(239,68,68,.12)" : "transparent" }}>{isFailed ? "⚠" : "✗"}</div>}
                       {isApproved && <div style={{ position: "absolute", top: 2, right: 2, fontSize: 9, background: "#7c3aed", color: "#fff", borderRadius: 3, padding: "1px 4px", fontWeight: 700 }}>✓</div>}
-                      <div style={{ position: "absolute", bottom: 0, left: 0, right: 0, background: "rgba(0,0,0,.65)", fontSize: 9, color: "rgba(255,255,255,.7)", textAlign: "center", padding: "2px 0", fontWeight: 600 }}>{isRunning ? "⏳" : `V${i + 1}`}</div>
+                      <div style={{ position: "absolute", bottom: 0, left: 0, right: 0, background: isFailed ? "rgba(127,29,29,.85)" : "rgba(0,0,0,.65)", fontSize: 9, color: isFailed ? "#fecaca" : "rgba(255,255,255,.7)", textAlign: "center", padding: "2px 0", fontWeight: 600 }}>{isRunning ? "⏳" : isFailed ? "Failed" : g.type.startsWith("video:effect:") ? g.type.slice("video:effect:".length) : `V${i + 1}`}</div>
                     </button>
                   );
                 })}
@@ -438,7 +462,13 @@ function Lightbox({ items, index, onClose, onPrev, onNext, onJump, onApprove, on
                 ) : selectedVideo.video_path ? (
                   <video key={selectedVideo.id} src={selectedVideo.video_path} style={{ maxHeight: "100%", maxWidth: "100%", borderRadius: 10, boxShadow: "0 0 60px rgba(0,0,0,.9)" }} controls loop autoPlay muted />
                 ) : (
-                  <div style={{ textAlign: "center", color: "#f87171", fontSize: 13 }}>Generation failed</div>
+                  <div style={{ textAlign: "center", maxWidth: 520, padding: "0 24px" }}>
+                    <div style={{ fontSize: 44, marginBottom: 12 }}>⚠</div>
+                    <div style={{ color: "#f87171", fontSize: 14, fontWeight: 700, marginBottom: 10 }}>Generation failed</div>
+                    {selectedVideo.error && (
+                      <pre style={{ fontSize: 11, color: "rgba(255,255,255,.7)", background: "rgba(127,29,29,.25)", border: "1px solid rgba(239,68,68,.3)", borderRadius: 8, padding: "10px 12px", textAlign: "left", whiteSpace: "pre-wrap", wordBreak: "break-word", margin: 0 }}>{selectedVideo.error}</pre>
+                    )}
+                  </div>
                 )
               ) : null}
             </div>
@@ -465,7 +495,7 @@ function Lightbox({ items, index, onClose, onPrev, onNext, onJump, onApprove, on
                   </div>
                 )}
               </div>
-              <div style={{ padding: 12, display: "flex", flexDirection: "column", gap: 8, borderTop: "1px solid rgba(255,255,255,.08)", flexShrink: 0 }}>
+              <div style={{ padding: 12, display: "flex", flexDirection: "column", gap: 8, borderTop: "1px solid rgba(255,255,255,.08)", flexShrink: 0, maxHeight: "60vh", overflowY: "auto" }}>
                 <button
                   disabled={!item.approvedImageId || videoGenerating}
                   onClick={async () => {
@@ -476,17 +506,59 @@ function Lightbox({ items, index, onClose, onPrev, onNext, onJump, onApprove, on
                   style={{ width: "100%", padding: "10px 0", fontSize: 12, fontWeight: 700, borderRadius: 9, border: "none", display: "flex", alignItems: "center", justifyContent: "center", gap: 7, background: !item.approvedImageId ? "rgba(255,255,255,.08)" : videoGenerating ? "rgba(124,58,237,.5)" : "#7c3aed", color: !item.approvedImageId ? "rgba(255,255,255,.3)" : "#fff", cursor: !item.approvedImageId || videoGenerating ? "not-allowed" : "pointer", transition: "background .2s" }}>
                   {videoGenerating
                     ? <><span className="spinner" style={{ width: 14, height: 14, borderWidth: 2, borderColor: "#fff transparent transparent transparent" }} /> Queuing render…</>
-                    : !item.approvedImageId ? "Approve image first" : "🎬 Generate Video"}
+                    : !item.approvedImageId ? "Approve image first" : "🎬 AI Video (WAN)"}
                 </button>
+
+                {/* ── Self-hosted motion effects ── */}
+                <div style={{ marginTop: 4, padding: "8px 2px 2px", borderTop: "1px dashed rgba(255,255,255,.08)" }}>
+                  <div style={{ fontSize: 10, fontWeight: 700, color: "rgba(255,255,255,.4)", textTransform: "uppercase", letterSpacing: 0.8, marginBottom: 6, display: "flex", alignItems: "center", gap: 6 }}>
+                    <span>✨ Motion Effects</span>
+                    <span style={{ fontSize: 9, color: "rgba(255,255,255,.25)", fontWeight: 500, textTransform: "none", letterSpacing: 0 }}>(self-hosted)</span>
+                  </div>
+                  <div style={{ display: "grid", gridTemplateColumns: "repeat(2,1fr)", gap: 5 }}>
+                    {VIDEO_EFFECTS.map((fx) => {
+                      const rendering = effectsRendering.has(fx.id);
+                      const disabled = !item.approvedImageId || rendering;
+                      return (
+                        <button
+                          key={fx.id}
+                          disabled={disabled}
+                          title={!item.approvedImageId ? "Approve image first" : `${fx.label} — ${fx.tagline}`}
+                          onClick={async () => {
+                            setEffectsRendering((s) => { const n = new Set(s); n.add(fx.id); return n; });
+                            try { await onRenderVideoEffect(item.shotId, fx.id); }
+                            finally { setEffectsRendering((s) => { const n = new Set(s); n.delete(fx.id); return n; }); }
+                          }}
+                          style={{
+                            padding: "6px 4px", borderRadius: 6, fontSize: 10, fontWeight: 600, textAlign: "left",
+                            border: "1px solid rgba(167,139,250,.25)",
+                            background: disabled ? "rgba(255,255,255,.04)" : rendering ? "rgba(167,139,250,.18)" : "rgba(167,139,250,.08)",
+                            color: !item.approvedImageId ? "rgba(255,255,255,.3)" : rendering ? "#c4b5fd" : "#d8d4ff",
+                            cursor: disabled ? "not-allowed" : "pointer",
+                            display: "flex", flexDirection: "column", gap: 2, minHeight: 40,
+                          }}>
+                          <span style={{ display: "flex", alignItems: "center", gap: 4 }}>
+                            {rendering
+                              ? <span className="spinner" style={{ width: 10, height: 10, borderWidth: 2, borderColor: "#c4b5fd transparent transparent transparent" }} />
+                              : <span style={{ fontSize: 12 }}>{fx.emoji}</span>}
+                            <span style={{ fontWeight: 700, fontSize: 10 }}>{fx.label}</span>
+                          </span>
+                          <span style={{ fontSize: 9, color: "rgba(255,255,255,.4)", fontWeight: 500 }}>{fx.tagline}</span>
+                        </button>
+                      );
+                    })}
+                  </div>
+                </div>
+
                 {selectedVideo && selectedVideo.video_path && selectedVideo.status !== "running" && (
-                  <>
-                    <button onClick={() => onApproveVideo(selectedVideo.id, item.shotId)} style={{ width: "100%", padding: "9px 0", fontSize: 12, fontWeight: 700, borderRadius: 9, border: "none", background: selectedVideo.id === item.approvedVideoId ? "#7c3aed" : "rgba(124,58,237,.15)", color: selectedVideo.id === item.approvedVideoId ? "#fff" : "#a78bfa", cursor: "pointer" }}>
-                      {selectedVideo.id === item.approvedVideoId ? "📹 Final Video" : "Set as Final"}
-                    </button>
-                    <button onClick={() => { if (confirm("Delete this video?")) onDeleteGen(selectedVideo.id); }} style={{ width: "100%", padding: "8px 0", fontSize: 12, fontWeight: 700, borderRadius: 9, border: "2px solid rgba(239,68,68,.3)", background: "rgba(239,68,68,.06)", color: "#f87171", cursor: "pointer" }}>
-                      🗑 Delete Video
-                    </button>
-                  </>
+                  <button onClick={() => onApproveVideo(selectedVideo.id, item.shotId)} style={{ width: "100%", padding: "9px 0", fontSize: 12, fontWeight: 700, borderRadius: 9, border: "none", background: selectedVideo.id === item.approvedVideoId ? "#7c3aed" : "rgba(124,58,237,.15)", color: selectedVideo.id === item.approvedVideoId ? "#fff" : "#a78bfa", cursor: "pointer" }}>
+                    {selectedVideo.id === item.approvedVideoId ? "📹 Final Video" : "Set as Final"}
+                  </button>
+                )}
+                {selectedVideo && selectedVideo.status !== "running" && selectedVideo.status !== "video_generating" && (
+                  <button onClick={() => { if (confirm(selectedVideo.status === "failed" ? "Remove this failed generation?" : "Delete this video?")) onDeleteGen(selectedVideo.id); }} style={{ width: "100%", padding: "8px 0", fontSize: 12, fontWeight: 700, borderRadius: 9, border: "2px solid rgba(239,68,68,.3)", background: "rgba(239,68,68,.06)", color: "#f87171", cursor: "pointer" }}>
+                    {selectedVideo.status === "failed" ? "🗑 Remove Failed" : "🗑 Delete Video"}
+                  </button>
                 )}
                 <input id={`vid-upload-${item.shotId}`} type="file" accept="image/*,video/*" style={{ display: "none" }} onChange={async e => {
                   const f = e.target.files?.[0]; if (!f) return; e.target.value = "";
@@ -502,9 +574,13 @@ function Lightbox({ items, index, onClose, onPrev, onNext, onJump, onApprove, on
 
         {/* ════ PIPELINE LOG TAB ════ */}
         {activeTab === "log" && (() => {
-          // Build frame groups for log filter
+          // Merge image + video gens, newest-first by created_at
+          const allGens = [...imageGens, ...videoGens].sort((a, b) =>
+            new Date(b.created_at).getTime() - new Date(a.created_at).getTime()
+          );
+          // Build frame groups for log filter (from both image and video gens)
           const logFrameKeys = new Map<string, { frameNum: number; frameDesc: string }>();
-          imageGens.forEach(gen => {
+          allGens.forEach(gen => {
             const { frameId } = parseGenType(gen.type);
             if (frameId && !logFrameKeys.has(frameId)) {
               const f = frames.find(fr => fr.id === frameId);
@@ -513,8 +589,8 @@ function Lightbox({ items, index, onClose, onPrev, onNext, onJump, onApprove, on
           });
           const logFrameList = [...logFrameKeys.entries()].sort((a, b) => a[1].frameNum - b[1].frameNum);
           const filteredGens = frameFilter
-            ? imageGens.filter(gen => { const { frameId } = parseGenType(gen.type); return frameId === frameFilter; })
-            : imageGens;
+            ? allGens.filter(gen => { const { frameId } = parseGenType(gen.type); return frameId === frameFilter; })
+            : allGens;
 
           return (
           <div style={{ flex: 1, display: "flex", flexDirection: "column", overflow: "hidden" }}>
@@ -522,9 +598,9 @@ function Lightbox({ items, index, onClose, onPrev, onNext, onJump, onApprove, on
             {logFrameList.length > 0 && (
               <div style={{ flexShrink: 0, display: "flex", alignItems: "center", gap: 6, padding: "6px 16px", borderBottom: "1px solid rgba(255,255,255,.07)", background: "rgba(0,0,0,.2)", overflowX: "auto" }}>
                 <span style={{ fontSize: 10, color: "rgba(255,255,255,.3)", flexShrink: 0, fontWeight: 600 }}>Frame:</span>
-                <button onClick={() => setFrameFilter(null)} style={{ padding: "3px 10px", borderRadius: 20, fontSize: 10, fontWeight: 700, flexShrink: 0, border: !frameFilter ? "2px solid rgba(255,255,255,.5)" : "2px solid rgba(255,255,255,.15)", background: !frameFilter ? "rgba(255,255,255,.1)" : "transparent", color: !frameFilter ? "rgba(255,255,255,.8)" : "rgba(255,255,255,.4)", cursor: "pointer" }}>All ({imageGens.length})</button>
+                <button onClick={() => setFrameFilter(null)} style={{ padding: "3px 10px", borderRadius: 20, fontSize: 10, fontWeight: 700, flexShrink: 0, border: !frameFilter ? "2px solid rgba(255,255,255,.5)" : "2px solid rgba(255,255,255,.15)", background: !frameFilter ? "rgba(255,255,255,.1)" : "transparent", color: !frameFilter ? "rgba(255,255,255,.8)" : "rgba(255,255,255,.4)", cursor: "pointer" }}>All ({allGens.length})</button>
                 {logFrameList.map(([fid, { frameNum, frameDesc }]) => {
-                  const cnt = imageGens.filter(g => { const { frameId } = parseGenType(g.type); return frameId === fid; }).length;
+                  const cnt = allGens.filter(g => { const { frameId } = parseGenType(g.type); return frameId === fid; }).length;
                   const isActive = frameFilter === fid;
                   return (
                     <button key={fid} onClick={() => setFrameFilter(isActive ? null : fid)} style={{ padding: "3px 10px", borderRadius: 20, fontSize: 10, fontWeight: 700, flexShrink: 0, border: isActive ? "2px solid #60a5fa" : "2px solid rgba(96,165,250,.2)", background: isActive ? "rgba(96,165,250,.15)" : "transparent", color: isActive ? "#60a5fa" : "rgba(255,255,255,.4)", cursor: "pointer", display: "flex", alignItems: "center", gap: 4 }}>
@@ -564,32 +640,40 @@ function Lightbox({ items, index, onClose, onPrev, onNext, onJump, onApprove, on
             {filteredGens.length === 0 ? (
               <div style={{ textAlign: "center", padding: "60px 20px", color: "rgba(255,255,255,.3)" }}>
                 <div style={{ fontSize: 40, marginBottom: 12 }}>📋</div>
-                <div style={{ fontSize: 14 }}>{imageGens.length === 0 ? "No generations yet" : "No entries for this frame"}</div>
-                {imageGens.length === 0 && <div style={{ fontSize: 12, marginTop: 6 }}>Click ⚡ Generate to start the pipeline</div>}
+                <div style={{ fontSize: 14 }}>{allGens.length === 0 ? "No generations yet" : "No entries for this frame"}</div>
+                {allGens.length === 0 && <div style={{ fontSize: 12, marginTop: 6 }}>Click ⚡ Generate to start the pipeline</div>}
               </div>
             ) : filteredGens.map((gen, i) => {
               const { frameId } = parseGenType(gen.type);
               const frame = frameId ? frames.find(f => f.id === frameId) : null;
+              const isVideo = gen.type === "video" || gen.type.startsWith("video:");
               const isRunning = gen.status === "running";
               const isFailed = gen.status === "failed";
               const statusColor = isRunning ? "#60a5fa" : isFailed ? "#f87171" : "#4ade80";
               const statusIcon = isRunning ? "⏳" : isFailed ? "✗" : "✓";
+              const typeBadgeColor = isVideo ? "#a78bfa" : "#fb923c";
               const displayModel = (gen.model ?? "").replace(/\.(safetensors|ckpt|pt)$/i, "") || item.shotPipelineModel?.replace(/\.(safetensors|ckpt|pt)$/i, "") || "Unknown";
               return (
                 <div key={gen.id} style={{ borderRadius: 10, padding: "12px 14px", border: `1px solid ${statusColor}30`, background: `${statusColor}08`, display: "flex", gap: 12, alignItems: "flex-start" }}>
                   {/* Thumbnail */}
-                  <div style={{ flexShrink: 0, width: 72, height: 48, borderRadius: 6, overflow: "hidden", background: "rgba(0,0,0,.4)", border: `1px solid ${statusColor}40`, display: "flex", alignItems: "center", justifyContent: "center" }}>
-                    {gen.image_path
-                      ? <img src={gen.image_path} alt="" style={{ width: "100%", height: "100%", objectFit: "cover" }} />
-                      : isRunning
-                        ? <span className="spinner" style={{ width: 16, height: 16, borderWidth: 2, borderColor: `${statusColor} transparent transparent transparent` }} />
-                        : <span style={{ fontSize: 18, opacity: .4 }}>{isFailed ? "✗" : "🖼"}</span>}
+                  <div style={{ flexShrink: 0, width: 72, height: 48, borderRadius: 6, overflow: "hidden", background: "rgba(0,0,0,.4)", border: `1px solid ${statusColor}40`, display: "flex", alignItems: "center", justifyContent: "center", position: "relative" }}>
+                    {isVideo && gen.video_path
+                      ? <>
+                          <video src={gen.video_path} muted style={{ width: "100%", height: "100%", objectFit: "cover" }} />
+                          <span style={{ position: "absolute", bottom: 2, right: 2, fontSize: 10, background: "rgba(0,0,0,.6)", color: "#fff", borderRadius: 3, padding: "0 4px" }}>▶</span>
+                        </>
+                      : gen.image_path
+                        ? <img src={gen.image_path} alt="" style={{ width: "100%", height: "100%", objectFit: "cover" }} />
+                        : isRunning
+                          ? <span className="spinner" style={{ width: 16, height: 16, borderWidth: 2, borderColor: `${statusColor} transparent transparent transparent` }} />
+                          : <span style={{ fontSize: 18, opacity: .4 }}>{isFailed ? "✗" : isVideo ? "🎬" : "🖼"}</span>}
                   </div>
 
                   {/* Details */}
                   <div style={{ flex: 1, minWidth: 0 }}>
                     <div style={{ display: "flex", alignItems: "center", gap: 6, marginBottom: 5, flexWrap: "wrap" }}>
                       <span style={{ fontSize: 10, fontWeight: 800, color: statusColor, background: `${statusColor}20`, borderRadius: 4, padding: "2px 7px" }}>{statusIcon} {isRunning ? "Running" : isFailed ? "Failed" : "Done"}</span>
+                      <span style={{ fontSize: 10, fontWeight: 800, color: typeBadgeColor, background: `${typeBadgeColor}20`, borderRadius: 4, padding: "2px 7px" }}>{isVideo ? "🎬 Video" : "🖼 Image"}</span>
                       {frame && <span style={{ fontSize: 10, fontWeight: 700, color: "#60a5fa", background: "rgba(96,165,250,.15)", borderRadius: 4, padding: "2px 7px" }}>Frame {frame.frame_number}</span>}
                       <span style={{ fontSize: 10, color: "rgba(255,255,255,.4)", marginLeft: "auto" }}>#{i + 1}</span>
                     </div>
@@ -995,18 +1079,19 @@ export default function EpisodePage() {
     mutate();
   }
 
-  async function generateSingle(shotId: string, newSeed?: number) {
+  async function generateSingle(shotId: string, newSeed?: number, opts?: { autoApprove?: boolean }) {
     const shot = (shots ?? []).find(s => s.id === shotId);
     const charData = shot?.character ? chars?.find(c => c.name === shot.character) : null;
     const model = (shot as Record<string,unknown>)?.pipeline_model as string | undefined
       ?? charData?.pipeline_model
       ?? project?.pipeline_model
       ?? undefined;
-    await fetch(`/api/shots/${shotId}/generate`, {
+    const res = await fetch(`/api/shots/${shotId}/generate`, {
       method: "POST",
       headers: { "Content-Type": "application/json" },
       body: JSON.stringify({ seed: newSeed, model }),
     });
+    const genResp = await res.json().catch(() => null) as { prompt_id?: string } | null;
     mutate();
     // Poll aggressively until shot is no longer generating (max 60s)
     let polls = 0;
@@ -1015,9 +1100,27 @@ export default function EpisodePage() {
       try { await fetch("/api/poll", { signal: AbortSignal.timeout(10000) }); } catch { /* ignore */ }
       mutate();
       // Stop polling once the shot is done or after 30 attempts (~60s)
-      const current = (await fetch(`/api/shots/${shotId}`).then(r => r.json()).catch(() => null));
-      if (polls >= 30 || (current?.shot?.status && !["generating", "video_generating"].includes(current.shot.status))) {
+      const current = (await fetch(`/api/shots/${shotId}`).then(r => r.json()).catch(() => null)) as { shot?: { status?: string }; generations?: Array<{ id: string; type: string; status: string; comfyui_prompt_id?: string | null; image_path?: string | null; created_at: string }> } | null;
+      const currentShot = current?.shot;
+      if (polls >= 30 || (currentShot?.status && !["generating", "video_generating"].includes(currentShot.status))) {
         clearInterval(pollInterval);
+        // Auto-approve the newly completed image when requested.
+        // Prefer matching by the prompt_id we just queued; otherwise use the latest completed image gen.
+        if (opts?.autoApprove && currentShot?.status !== "failed") {
+          const gens = current?.generations ?? [];
+          const match = (genResp?.prompt_id && gens.find(g => g.comfyui_prompt_id === genResp.prompt_id && g.status === "completed" && g.image_path))
+            ?? gens
+              .filter(g => (g.type === "image" || g.type.startsWith("image:")) && g.status === "completed" && !!g.image_path)
+              .sort((a, b) => new Date(b.created_at).getTime() - new Date(a.created_at).getTime())[0];
+          if (match) {
+            await fetch(`/api/shots/${shotId}/approve`, {
+              method: "POST",
+              headers: { "Content-Type": "application/json" },
+              body: JSON.stringify({ generation_id: match.id }),
+            });
+            mutate();
+          }
+        }
       }
     }, 2000);
   }
@@ -1038,6 +1141,8 @@ export default function EpisodePage() {
     if (!res.ok) { toast(`Video error: ${d.error}`, "error"); }
     else if (d.skipped) { toast("Already generating — wait for current render to finish", "warning"); }
     else if (d.queued === 0 && d.errors?.length) { toast(`Video failed: ${d.errors[0]}`, "error"); }
+    else if (d.queued === 0 && d.pending === 0) { toast("Video generation produced no results", "error"); }
+    else if (d.queued > 0) { toast(d.has_audio ? "Video queued" : "Video queued (no audio)", "success"); }
     mutate();
   }
 
@@ -1052,7 +1157,9 @@ export default function EpisodePage() {
       const res = await fetch(`/api/episodes/${epId}/generate-videos`, { method: "POST" });
       const data = await res.json();
       if (data.queued > 0) toast(`Queued ${data.queued} video(s)`, "success");
+      else if (data.errors?.length) toast(`Video failed: ${data.errors[0]}`, "error");
       else toast(data.message || "No shots ready for video (need approved images first)", "warning");
+      if (data.queued > 0 && data.errors?.length) toast(`${data.errors.length} shot(s) failed — ${data.errors[0]}`, "warning");
       if (data.errors?.length) console.warn("Video generation errors:", data.errors);
     } catch (e) { toast("Error: " + String(e), "error"); }
     setVidLoading(false);
@@ -1077,18 +1184,21 @@ export default function EpisodePage() {
   }
 
   const [ttsVidLoading, setTtsVidLoading] = useState(false);
-  async function generateAllTTSAndVideos() {
-    if (!confirm("Generate TTS audio for all shots with dialogue, then queue Wan 2.1 video for all shots with approved images?")) return;
+  async function generateAllTTS() {
+    if (!confirm("Generate TTS audio for all shots with dialogue?")) return;
     setTtsVidLoading(true);
     try {
       const res = await fetch(`/api/episodes/${epId}/generate-videos-with-tts`, {
         method: "POST",
         headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({}),
+        body: JSON.stringify({ ttsOnly: true }),
       });
       const data = await res.json();
-      toast(`TTS: ${data.tts_generated} generated · Videos queued: ${data.videos_queued}`, "success");
-      if (data.errors?.length) toast(`${data.errors.length} error(s) — check console`, "warning");
+      toast(`TTS: ${data.tts_generated} generated`, "success");
+      if (data.errors?.length) {
+        toast(`${data.errors.length} error(s) — ${data.errors[0]}`, "warning");
+        console.warn("TTS errors:", data.errors);
+      }
     } catch (e) { toast("Error: " + String(e), "error"); }
     setTtsVidLoading(false);
     mutate();
@@ -1256,9 +1366,14 @@ export default function EpisodePage() {
           <button className="btn btn-secondary btn-sm" onClick={generateAllVideos} disabled={vidLoading}>
             {vidLoading ? <span className="spinner" /> : "🎬"} Videos
           </button>
-          <button className="btn btn-secondary btn-sm" onClick={generateAllTTSAndVideos} disabled={ttsVidLoading}>
-            {ttsVidLoading ? <span className="spinner" /> : "🎙"} TTS + Video
+          <button className="btn btn-secondary btn-sm" onClick={generateAllTTS} disabled={ttsVidLoading}>
+            {ttsVidLoading ? <span className="spinner" /> : "🎙"} TTS
           </button>
+          <Link href={`/projects/${id}/episodes/${epId}/final-video`}
+            className="btn btn-sm"
+            style={{ background: "rgba(167,139,250,.15)", color: "#a78bfa", border: "1px solid rgba(167,139,250,.4)", borderRadius: 6, fontWeight: 700, fontSize: 12, padding: "4px 10px", textDecoration: "none" }}>
+            🎞 Final Video
+          </Link>
 
           <div style={{ width: 1, height: 22, background: "var(--border)", margin: "0 2px" }} />
 
@@ -1541,7 +1656,7 @@ export default function EpisodePage() {
                 return (
                   <ShotCard key={shot.id} shot={shot} defaultModel={resolvedDefaultModel}
                     onEdit={() => setEditing(shot)}
-                    onGenerate={() => generateSingle(shot.id)}
+                    onGenerate={() => generateSingle(shot.id, undefined, { autoApprove: true })}
                     onFrameClick={(fId) => {
                       if (fId === "__add__") { setFrameMgrShotId(shot.id); return; }
                       const frame = shot.frames?.find(f => f.id === fId);
@@ -1662,6 +1777,21 @@ export default function EpisodePage() {
           }}
           onGenerateVideo={async (shotId, preset) => {
             await generateVideo(shotId, preset);
+          }}
+          onRenderVideoEffect={async (shotId, effect) => {
+            try {
+              const res = await fetch(`/api/shots/${shotId}/generate-video-effect`, {
+                method: "POST",
+                headers: { "Content-Type": "application/json" },
+                body: JSON.stringify({ effect }),
+              });
+              const d = await res.json();
+              if (!res.ok) { toast(`Effect render failed: ${d.error ?? res.statusText}`, "error"); }
+              else { toast(`✨ ${effect} rendered`, "success"); }
+            } catch (e) {
+              toast(`Effect render failed: ${e instanceof Error ? e.message : String(e)}`, "error");
+            }
+            mutate();
           }}
           onDeleteGen={async (genId) => {
             await fetch(`/api/generations/${genId}`, { method: "DELETE" });

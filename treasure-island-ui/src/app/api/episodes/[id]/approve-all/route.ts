@@ -21,13 +21,12 @@ export async function POST(_: Request, { params }: { params: Promise<{ id: strin
   for (const shot of shots) {
     const gen = gens.find(g => g.shot_id === shot.id);
     if (gen) {
-      const existingIds: string[] = shot.approved_image_ids ?? [];
-      const next = existingIds.includes(gen.id) ? existingIds : [...existingIds, gen.id];
+      // Single-select: each shot's approval is the latest completed image only.
       await prisma.shot.update({
         where: { id: shot.id },
         data: {
           approved_image_id: gen.id,
-          approved_image_ids: next,
+          approved_image_ids: [gen.id],
           status: "approved",
         },
       });

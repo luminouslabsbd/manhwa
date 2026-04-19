@@ -1,4 +1,4 @@
-import { resolveComfyUIHost } from "@/lib/pod-config";
+import { resolveComfyUIHost, resolveVideoHost } from "@/lib/pod-config";
 
 // ── Config ──────────────────────────────────────────────────────────
 const DEFAULT_CHECKPOINT = "flux1-schnell-fp8.safetensors";
@@ -81,6 +81,11 @@ export function getHost() {
   return resolveComfyUIHost();
 }
 
+/** Host for video workflows — separate ComfyUI pod if configured, else falls back to image host. */
+export function getVideoHost() {
+  return resolveVideoHost();
+}
+
 /** Ensures model name has a file extension (.safetensors assumed if missing) */
 function ensureExt(name: string): string {
   return /\.(safetensors|ckpt|pt|pth|bin)$/i.test(name) ? name : `${name}.safetensors`;
@@ -89,6 +94,43 @@ function ensureExt(name: string): string {
 export function getModelName(_type?: string, override?: string | null) {
   const name = override || process.env.COMFYUI_MODEL || DEFAULT_CHECKPOINT;
   return ensureExt(name);
+}
+
+// Cache the pod's available checkpoint list so fallback paths can pick
+// a real model instead of blindly using a default that may not exist on the pod.
+let _ckptCache: { list: string[]; expires: number } | null = null;
+export async function getAvailableCheckpoints(host = getHost()): Promise<string[]> {
+  if (_ckptCache && Date.now() < _ckptCache.expires) return _ckptCache.list;
+  try {
+    const res = await fetch(`${host}/object_info/CheckpointLoaderSimple`, {
+      cache: "no-store",
+      signal: withTimeout(5000),
+    });
+    if (!res.ok) return [];
+    const j = await res.json();
+    const list: string[] = j?.CheckpointLoaderSimple?.input?.required?.ckpt_name?.[0] ?? [];
+    _ckptCache = { list, expires: Date.now() + 60_000 };
+    return list;
+  } catch {
+    return [];
+  }
+}
+
+/**
+ * Returns a checkpoint that is guaranteed to exist on the pod.
+ * Preference order: `preferred` if present → env COMFYUI_MODEL if present →
+ * first loaded SDXL-looking checkpoint → first any checkpoint → preferred (will error at queue time).
+ */
+export async function resolveAvailableCheckpoint(preferred?: string | null, host = getHost()): Promise<string> {
+  const wanted = preferred ? ensureExt(preferred) : null;
+  const list = await getAvailableCheckpoints(host);
+  if (!list.length) return wanted ?? getModelName();
+  if (wanted && list.includes(wanted)) return wanted;
+  const envName = process.env.COMFYUI_MODEL ? ensureExt(process.env.COMFYUI_MODEL) : null;
+  if (envName && list.includes(envName)) return envName;
+  // Prefer SDXL-style names over flux/video models for the SDXL img2img fallback
+  const sdxl = list.find((n) => /xl|sdxl|animagine|juggernaut|realvis|dreamshaper/i.test(n));
+  return sdxl ?? list[0];
 }
 
 function withTimeout(ms: number): AbortSignal {
@@ -534,6 +576,23 @@ export function buildWan2_1_I2VWorkflow_14B(
   const frames = Math.max(5, Math.round((clampedFrames - 1) / 4) * 4 + 1);
 
   return {
+    // Block-swap config — offloads 20/40 transformer blocks to CPU RAM so the
+    // 14B fp8 model + umt5-xxl text encoder fit on 24GB GPUs (3090/4090).
+    // Without this the workflow OOMs at the WanVideoSampler step.
+    "0": {
+      class_type: "WanVideoBlockSwap",
+      inputs: {
+        blocks_to_swap: 20,
+        offload_img_emb: true,
+        offload_txt_emb: true,
+        use_non_blocking: true,
+        // These are "optional" in the ComfyUI schema but node code compares them
+        // as ints unconditionally. If omitted they pass as None → TypeError.
+        vace_blocks_to_swap: 0,
+        prefetch_blocks: 0,
+        block_swap_debug: false,
+      },
+    },
     "1": {
       class_type: "WanVideoModelLoader",
       inputs: {
@@ -541,6 +600,7 @@ export function buildWan2_1_I2VWorkflow_14B(
         base_precision: "bf16",
         quantization: "fp8_e4m3fn",
         load_device: "offload_device",
+        block_swap_args: ["0", 0],
       },
     },
     "2": {
@@ -561,7 +621,7 @@ export function buildWan2_1_I2VWorkflow_14B(
         positive_prompt: prompt,
         negative_prompt: "static image, no motion, blurry, low quality, worst quality",
         t5: ["2", 0],
-        force_offload: false,
+        force_offload: true,
         model_to_offload: ["1", 0],
       },
     },
@@ -572,7 +632,7 @@ export function buildWan2_1_I2VWorkflow_14B(
         noise_aug_strength: 0.0,
         start_latent_strength: 1.0,
         end_latent_strength: 0.0,
-        force_offload: false,
+        force_offload: true,
         vae: ["3", 0],
         start_image: ["4", 0],
       },
@@ -581,7 +641,7 @@ export function buildWan2_1_I2VWorkflow_14B(
       class_type: "WanVideoSampler",
       inputs: {
         model: ["1", 0], image_embeds: ["6", 0], text_embeds: ["5", 0],
-        steps, cfg: 6.0, shift: 5.0, seed, force_offload: false,
+        steps, cfg: 6.0, shift: 5.0, seed, force_offload: true,
         scheduler: "unipc", riflex_freq_index: 0,
       },
     },

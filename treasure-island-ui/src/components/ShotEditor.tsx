@@ -61,9 +61,11 @@ export default function ShotEditor({ shot, onClose, onSaved, onNavigate, charact
     setTab("prompts");
     setPendingSuggestions(null);
     setSavedFrames([]);
-    // Fetch fresh shot data (the prop may be stale from the parent SWR cache)
+    // Fetch fresh shot data (the prop may be stale from the parent SWR cache).
+    // The API returns { shot, generations } — unwrap to the shot object.
     fetch(`/api/shots/${shot.id}`).then(r => r.ok ? r.json() : null).then(d => {
-      if (d) setForm(d);
+      const fresh = d?.shot ?? d;
+      if (fresh && typeof fresh === "object" && "id" in fresh) setForm(fresh);
     }).catch(() => {});
   }, [shot.id]); // eslint-disable-line react-hooks/exhaustive-deps
 
@@ -279,7 +281,12 @@ export default function ShotEditor({ shot, onClose, onSaved, onNavigate, charact
   }
 
   async function handleRetryVideo() {
-    await fetch(`/api/shots/${shot.id}/generate-video`, { method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify({}) });
+    const res = await fetch(`/api/shots/${shot.id}/generate-video`, { method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify({}) });
+    const d = await res.json().catch(() => ({}));
+    if (!res.ok) toast(`Video error: ${d.error ?? res.statusText}`, "error");
+    else if (d.skipped) toast("Already generating — wait for current render to finish", "warning");
+    else if (d.queued === 0 && d.errors?.length) toast(`Video failed: ${d.errors[0]}`, "error");
+    else if (d.queued > 0) toast("Video queued", "success");
     mutateDetail();
     onSaved();
   }

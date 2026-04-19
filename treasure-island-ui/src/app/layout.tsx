@@ -13,7 +13,7 @@ export default async function RootLayout({ children }: { children: React.ReactNo
   return (
     <html lang="en">
       <body>
-        {session && <NavBar name={session.name} email={session.email} role={session.role} />}
+        {session && <NavBar name={session.name} email={session.email} role={session.role} impersonator={session.impersonator} />}
         {children}
       </body>
     </html>

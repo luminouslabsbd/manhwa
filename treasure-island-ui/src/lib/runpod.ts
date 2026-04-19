@@ -48,6 +48,8 @@ export interface GpuType {
   communityPrice: number | null;
   secureCloud: boolean;
   securePrice: number | null;
+  /** Current availability: "High" | "Medium" | "Low" | null (null = no stock). */
+  stockStatus?: "High" | "Medium" | "Low" | null;
 }
 
 // ── Pod queries ───────────────────────────────────────────────────────────────
@@ -74,12 +76,22 @@ export async function listPods(): Promise<RunPodPod[]> {
 }
 
 export async function getGpuTypes(): Promise<GpuType[]> {
+  // lowestPrice(input:{gpuCount:1}).stockStatus is RunPod's freshest availability
+  // signal — "High" | "Medium" | "Low" | null. null means no host has this GPU.
   const data = await gql(
-    `query{gpuTypes{id displayName memoryInGb communityCloud communityPrice secureCloud securePrice}}`,
+    `query{gpuTypes{
+      id displayName memoryInGb communityCloud communityPrice secureCloud securePrice
+      lowestPrice(input:{gpuCount:1}){ stockStatus }
+    }}`,
     {},
     20000,
   );
-  return (data.gpuTypes ?? []) as GpuType[];
+  type Raw = Omit<GpuType, "stockStatus"> & { lowestPrice?: { stockStatus?: GpuType["stockStatus"] } | null };
+  const raw = (data.gpuTypes ?? []) as Raw[];
+  return raw.map(({ lowestPrice, ...g }) => ({
+    ...g,
+    stockStatus: lowestPrice?.stockStatus ?? null,
+  }));
 }
 
 // ── Pod mutations ─────────────────────────────────────────────────────────────
@@ -108,6 +120,15 @@ export async function deletePod(podId: string) {
   return data.podTerminate;
 }
 
+export interface PodComponents {
+  comfyui?: boolean; // ComfyUI + torch + pip (required for sdxl/flux/video)
+  tts?: boolean;     // edge-tts Flask server on :5000
+  ollama?: boolean;  // Ollama LLM server on :11434
+  sdxl?: boolean;    // SDXL checkpoints (animagine + juggernaut, ~10 GB)
+  flux?: boolean;    // FLUX.1-schnell + CLIPs + AE VAE (~20 GB)
+  video?: boolean;   // Wan 2.1 t2v/i2v models (~20 GB)
+}
+
 export interface CreatePodInput {
   gpuTypeId: string;
   setupScript: string; // base64-encoded pod-setup.sh
@@ -115,9 +136,18 @@ export interface CreatePodInput {
   civitaiToken?: string;
   publicKey?: string;
   ollamaModel?: string;
+  cloudType?: "COMMUNITY" | "SECURE";
+  components?: PodComponents;
 }
 
-export async function createPod(input: CreatePodInput): Promise<{ id: string }> {
+export class NoCapacityError extends Error {
+  constructor(message: string, readonly cloudType: "COMMUNITY" | "SECURE") {
+    super(message);
+    this.name = "NoCapacityError";
+  }
+}
+
+export async function createPod(input: CreatePodInput): Promise<{ id: string; cloudType: "COMMUNITY" | "SECURE" }> {
   const {
     gpuTypeId,
     setupScript,
@@ -125,52 +155,94 @@ export async function createPod(input: CreatePodInput): Promise<{ id: string }> 
     civitaiToken = "",
     publicKey = "",
     ollamaModel = "qwen2.5:7b",
+    cloudType = "COMMUNITY",
+    components = {},
   } = input;
 
-  // Inline SSH bootstrap + decode+run setup.sh in background
-  const dockerCmd = [
-    "bash", "-c",
-    `apt-get update -qq;`,
-    `apt-get install -y -qq openssh-server 2>/dev/null;`,
-    `mkdir -p /root/.ssh /run/sshd /workspace;`,
-    `echo "${publicKey.replace(/"/g, '\\"')}" > /root/.ssh/authorized_keys;`,
-    `chmod 700 /root/.ssh; chmod 600 /root/.ssh/authorized_keys;`,
-    `echo PermitRootLogin yes >> /etc/ssh/sshd_config;`,
-    `/usr/sbin/sshd 2>/dev/null;`,
-    `echo $SETUP_SCRIPT | base64 -d > /workspace/setup.sh;`,
-    `chmod +x /workspace/setup.sh;`,
-    `bash /workspace/setup.sh >> /workspace/setup.log 2>&1 &`,
-    `sleep infinity`,
-  ].join(" ");
+  // Default all-on when `components` is empty (back-compat). Otherwise honor
+  // exactly what the caller passed, only flipping required deps.
+  const hasAny = Object.keys(components).length > 0;
+  const comp = hasAny
+    ? components
+    : { comfyui: true, tts: true, ollama: true, sdxl: true, flux: true, video: true };
+  // sdxl/flux/video require ComfyUI to render — auto-enable
+  const needComfy = !!(comp.sdxl || comp.flux || comp.video);
+  const finalComp = { ...comp, comfyui: comp.comfyui || needComfy };
 
-  const envVars = [
-    { key: "SETUP_SCRIPT", value: setupScript },
-    { key: "HF_TOKEN", value: hfToken },
-    { key: "CIVITAI_TOKEN", value: civitaiToken },
-    { key: "OLLAMA_MODEL", value: ollamaModel },
-  ];
+  // Inline SSH bootstrap + decode+run setup.sh in background.
+  // NOTE: the setup.sh launch ends with `&` (background) then `sleep infinity` —
+  // `&` already terminates the statement, so no `;` between them.
+  const bootstrap = [
+    `apt-get update -qq`,
+    `apt-get install -y -qq openssh-server 2>/dev/null || true`,
+    `mkdir -p /root/.ssh /run/sshd /workspace`,
+    `printf '%s\\n' "$PUBLIC_KEY" > /root/.ssh/authorized_keys`,
+    `chmod 700 /root/.ssh`,
+    `chmod 600 /root/.ssh/authorized_keys`,
+    `echo PermitRootLogin yes >> /etc/ssh/sshd_config`,
+    `/usr/sbin/sshd 2>/dev/null || true`,
+    `printf '%s' "$SETUP_SCRIPT" | base64 -d > /workspace/setup.sh`,
+    `chmod +x /workspace/setup.sh`,
+    `(bash /workspace/setup.sh >> /workspace/setup.log 2>&1 &)`,
+    `exec sleep infinity`,
+  ].join("; ");
 
-  const envStr = envVars.map((e) => `{key:"${e.key}",value:${JSON.stringify(e.value)}}`).join(",");
+  const body = {
+    name: `ti-${gpuTypeId.replace(/[^a-zA-Z0-9]/g, "").slice(0, 20).toLowerCase()}-${Date.now().toString(36)}`,
+    imageName: "nvidia/cuda:12.1.1-devel-ubuntu22.04",
+    cloudType,
+    gpuTypeIds: [gpuTypeId],
+    gpuCount: 1,
+    containerDiskInGb: 30,
+    volumeInGb: 150,
+    volumeMountPath: "/workspace",
+    ports: ["8188/http", "11434/http", "5000/http", "22/tcp"],
+    dockerEntrypoint: ["/bin/bash", "-lc", bootstrap],
+    env: {
+      SETUP_SCRIPT: setupScript,
+      HF_TOKEN: hfToken,
+      CIVITAI_TOKEN: civitaiToken,
+      OLLAMA_MODEL: ollamaModel,
+      PUBLIC_KEY: publicKey,
+      INSTALL_COMFYUI: finalComp.comfyui ? "1" : "0",
+      INSTALL_TTS:     finalComp.tts     ? "1" : "0",
+      INSTALL_OLLAMA:  finalComp.ollama  ? "1" : "0",
+      INSTALL_SDXL:    finalComp.sdxl    ? "1" : "0",
+      INSTALL_FLUX:    finalComp.flux    ? "1" : "0",
+      INSTALL_VIDEO:   finalComp.video   ? "1" : "0",
+    },
+  };
 
-  const data = await gql(
-    `mutation{podFindAndDeployOnDemand(input:{
-      cloudType:COMMUNITY
-      gpuTypeId:"${gpuTypeId}"
-      gpuCount:1
-      containerDiskInGb:30
-      volumeInGb:150
-      volumeMountPath:"/workspace"
-      startJupyter:false
-      startSsh:true
-      imageName:"nvidia/cuda:12.1.1-devel-ubuntu22.04"
-      ports:"8188/http,11434/http,5000/http,22/tcp"
-      env:[${envStr}]
-      dockerArgs:${JSON.stringify(dockerCmd)}
-    }){id imageName machineId}}`,
-    {},
-    30000,
-  );
-  return data.podFindAndDeployOnDemand as { id: string };
+  const controller = new AbortController();
+  const timeout = setTimeout(() => controller.abort(), 30000);
+  try {
+    const res = await fetch("https://rest.runpod.io/v1/pods", {
+      method: "POST",
+      headers: {
+        "Authorization": `Bearer ${API_KEY}`,
+        "Content-Type": "application/json",
+      },
+      body: JSON.stringify(body),
+      cache: "no-store",
+      signal: controller.signal,
+    });
+    const text = await res.text();
+    let json: { id?: string; error?: string; message?: string; errors?: Array<{ message: string }> } = {};
+    try { json = text ? JSON.parse(text) : {}; } catch { /* non-json */ }
+    if (!res.ok) {
+      const msg = json.error || json.message || json.errors?.[0]?.message || text || `HTTP ${res.status}`;
+      // RunPod returns one of several phrasings when no machine in the selected
+      // cloud has capacity / resources for the requested pod spec.
+      if (/does not have the resources|no (instances|machines|available)|currently available|out of stock|no capacity/i.test(msg)) {
+        throw new NoCapacityError(msg, cloudType);
+      }
+      throw new Error(`RunPod: ${msg}`);
+    }
+    if (!json.id) throw new Error("RunPod: pod created but no id returned");
+    return { id: json.id, cloudType };
+  } finally {
+    clearTimeout(timeout);
+  }
 }
 
 // ── SSH helpers ───────────────────────────────────────────────────────────────

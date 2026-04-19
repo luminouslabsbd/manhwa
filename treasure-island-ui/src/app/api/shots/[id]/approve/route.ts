@@ -20,14 +20,13 @@ export async function POST(req: Request, { params }: { params: Promise<{ id: str
     return Response.json({ ok: true });
 
   } else {
-    // Image: toggle in approved_image_ids array
+    // Image approval is single-select: approving replaces any previous approval,
+    // clicking the currently-approved image again unapproves it.
     const current: string[] = shot.approved_image_ids ?? [];
-    const idx = current.indexOf(generation_id);
-    const next = idx === -1
-      ? [...current, generation_id]
-      : current.filter((_, i) => i !== idx);
+    const isAlreadyApproved = current.length === 1 && current[0] === generation_id;
+    const next = isAlreadyApproved ? [] : [generation_id];
 
-    const newApprovedId = next[next.length - 1] ?? null;
+    const newApprovedId = next[0] ?? null;
     const newStatus = next.length > 0 ? "approved" : "done";
 
     await prisma.shot.update({

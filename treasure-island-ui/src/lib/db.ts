@@ -157,7 +157,7 @@ export async function save(db: DB, userId?: string): Promise<void> {
     if (psIds.length > 0) {
       await tx.promptSettings.deleteMany({ where: { id: { notIn: psIds }, project_id: { in: projectIds.length > 0 ? projectIds : ["__none__"] } } });
     }
-  }, { timeout: 30000 });
+  }, { timeout: 120000, maxWait: 20000 });
 }
 
 // Convenience helpers used by a few routes

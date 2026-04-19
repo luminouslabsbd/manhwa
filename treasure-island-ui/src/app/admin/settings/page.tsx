@@ -6,6 +6,7 @@ export default function SettingsPage() {
 
   const initial = {
     comfyuiHost: cfg.comfyuiHost ?? "",
+    videoHost:   cfg.videoHost ?? "",
     ollamaHost:  cfg.ollamaHost ?? "",
     ttsHost:     cfg.ttsHost ?? "",
   };

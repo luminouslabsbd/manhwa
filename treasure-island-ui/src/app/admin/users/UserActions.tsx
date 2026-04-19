@@ -28,8 +28,25 @@ export default function UserActions({ userId, isActive, role }: Props) {
     setLoading(false);
   }
 
+  async function loginAs() {
+    setLoading(true);
+    const res = await fetch(`/api/admin/impersonate/${userId}`, { method: "POST" });
+    if (!res.ok) {
+      const { error } = await res.json().catch(() => ({ error: "Failed to impersonate" }));
+      alert(error || "Failed to impersonate");
+      setLoading(false);
+      return;
+    }
+    router.push("/projects");
+    router.refresh();
+  }
+
   return (
     <div style={{ display: "flex", alignItems: "center", justifyContent: "flex-end", gap: 8 }}>
+      <button onClick={loginAs} disabled={disabled || !isActive} className="btn btn-secondary btn-xs"
+        title={role === "SUPERADMIN" ? "Cannot impersonate admin" : !isActive ? "User is disabled" : "Log in as this user"}>
+        Login as
+      </button>
       <button onClick={toggle} disabled={disabled} className="btn btn-secondary btn-xs"
         title={role === "SUPERADMIN" ? "Cannot modify admin" : undefined}>
         {isActive ? "Disable" : "Enable"}

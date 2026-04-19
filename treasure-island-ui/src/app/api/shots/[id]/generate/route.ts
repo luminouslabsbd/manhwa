@@ -19,11 +19,9 @@ export async function POST(req: Request, { params }: { params: Promise<{ id: str
   const shot = await prisma.shot.findUnique({ where: { id } });
   if (!shot) return Response.json({ error: "Not found" }, { status: 404 });
 
-  // Require a character to be assigned before generating
-  if (!shot.character?.trim()) {
-    return Response.json({ error: "no_character", message: "Assign a character to this shot before generating." }, { status: 400 });
-  }
-
+  // Character is OPTIONAL. Shots without a character generate environment/scene-only
+  // images from shot.full_prompt — the project's base image (if any) is used as
+  // visual reference, else it falls through to pure text-to-image.
   const project = await prisma.project.findUnique({ where: { id: shot.project_id } });
 
   // Resolve character for this shot

@@ -109,8 +109,8 @@ const inVideoState = shot.status === "video_done" || shot.status === "video_gene
       >
         {showVideo ? (
           <video src={shot.latest_video!} style={{ width: "100%", height: "100%", objectFit: "cover" }} muted playsInline loop autoPlay />
-        ) : shot.latest_image ? (
-          <img src={shot.latest_image} alt={`Shot ${shot.shot_number}`} style={{ width: "100%", height: "100%", objectFit: "contain" }} />
+        ) : (approvedImgGen?.image_path ?? shot.latest_image) ? (
+          <img src={approvedImgGen?.image_path ?? shot.latest_image!} alt={`Shot ${shot.shot_number}`} style={{ width: "100%", height: "100%", objectFit: "contain" }} />
         ) : (
           <div style={{ display: "flex", alignItems: "center", justifyContent: "center", height: "100%", color: "var(--muted)", fontSize: 32 }}>
             {shot.status === "generating" ? <span className="spinner" style={{ width: 32, height: 32, borderWidth: 3 }} /> : "🎬"}
@@ -242,10 +242,10 @@ const inVideoState = shot.status === "video_done" || shot.status === "video_gene
           <button className="btn btn-secondary btn-xs" style={{ flex: 1 }} onClick={e => { e.stopPropagation(); onEdit(); }}>✏ Edit</button>
           <button
             className="btn btn-primary btn-xs"
-            style={{ flex: 1, opacity: (isGenerating || noCharacter) ? 0.4 : 1, cursor: (isGenerating || noCharacter) ? "not-allowed" : "pointer" }}
-            onClick={e => { e.stopPropagation(); if (!isGenerating && !noCharacter) { setGenPending(true); onGenerate?.(); } }}
-            title={noCharacter ? "Assign a character first" : isGenerating ? "Generating…" : "Generate (single model)"}
-            disabled={isGenerating || noCharacter}
+            style={{ flex: 1, opacity: isGenerating ? 0.4 : 1, cursor: isGenerating ? "not-allowed" : "pointer" }}
+            onClick={e => { e.stopPropagation(); if (!isGenerating) { setGenPending(true); onGenerate?.(); } }}
+            title={isGenerating ? "Generating…" : noCharacter ? "Generate (scene-only, no character)" : "Generate (single model)"}
+            disabled={isGenerating}
           >
             {isGenerating ? <span className="spinner" style={{ width: 12, height: 12, borderWidth: 2, display: "inline-block" }} /> : "⚡ Gen"}
           </button>

@@ -1,7 +1,18 @@
 "use client";
 
 import { useState, useEffect, useRef, useCallback } from "react";
-import type { PodConfig, VideoQualityPreset } from "@/lib/pod-config";
+import type { PodConfig, PodService, VideoQualityPreset } from "@/lib/pod-config";
+
+type ServiceSelection = "all" | PodService[];
+
+const SERVICE_LABELS: Record<PodService, string> = {
+  image: "Image (ComfyUI)",
+  video: "Video (ComfyUI)",
+  tts: "TTS",
+  ollama: "Ollama",
+};
+
+const SERVICE_ORDER: PodService[] = ["image", "video", "tts", "ollama"];
 
 type RunPodPod = {
   id: string;
@@ -24,6 +35,9 @@ type GpuType = {
   memoryInGb: number;
   communityCloud: boolean;
   communityPrice: number | null;
+  secureCloud?: boolean;
+  securePrice?: number | null;
+  stockStatus?: "High" | "Medium" | "Low" | null;
 };
 
 // ── Helpers ───────────────────────────────────────────────────────────────────
@@ -49,6 +63,35 @@ function statusDot(status: string) {
   );
 }
 
+function CompCheckbox({ label, checked, onChange, disabled }: {
+  label: string; checked: boolean; onChange: (v: boolean) => void; disabled?: boolean;
+}) {
+  return (
+    <label style={{ display: "flex", alignItems: "center", gap: 6, cursor: disabled ? "not-allowed" : "pointer", opacity: disabled ? 0.6 : 1 }}>
+      <input type="checkbox" checked={checked} disabled={disabled} onChange={(e) => onChange(e.target.checked)} />
+      <span>{label}</span>
+    </label>
+  );
+}
+
+function StockBadge({ level }: { level: GpuType["stockStatus"] }) {
+  if (!level) return null;
+  const colors: Record<string, { bg: string; fg: string }> = {
+    High:   { bg: "#dcfce7", fg: "#166534" },
+    Medium: { bg: "#fef3c7", fg: "#92400e" },
+    Low:    { bg: "#fee2e2", fg: "#991b1b" },
+  };
+  const c = colors[level] ?? colors.Low;
+  return (
+    <span title={`Availability: ${level}`} style={{
+      fontSize: 10, fontWeight: 700, padding: "1px 6px", borderRadius: 999,
+      background: c.bg, color: c.fg, textTransform: "uppercase", letterSpacing: 0.5,
+    }}>
+      {level} stock
+    </span>
+  );
+}
+
 // ── Main component ────────────────────────────────────────────────────────────
 
 export default function PodManager({ initialConfig }: { initialConfig: PodConfig }) {
@@ -67,6 +110,13 @@ export default function PodManager({ initialConfig }: { initialConfig: PodConfig
       const d = await r.json();
       setPods(d.pods ?? []);
       setGpuTypes(d.gpuTypes ?? []);
+      if (d.errors?.gpuTypes) {
+        setMsg({ text: `GPU list unavailable: ${d.errors.gpuTypes}`, type: "err" });
+      } else if (d.errors?.pods) {
+        setMsg({ text: `Pod list unavailable: ${d.errors.pods}`, type: "err" });
+      } else {
+        setMsg(null);
+      }
     } catch {
       setMsg({ text: "Failed to load pods", type: "err" });
     } finally {
@@ -81,7 +131,7 @@ export default function PodManager({ initialConfig }: { initialConfig: PodConfig
     setTimeout(() => setMsg(null), 4000);
   };
 
-  const podAction = async (podId: string, action: "start" | "stop" | "delete" | "set-host") => {
+  const podAction = async (podId: string, action: "start" | "stop" | "delete") => {
     setBusy(podId);
     try {
       if (action === "delete" && !confirm(`Delete pod ${podId}? This cannot be undone.`)) {
@@ -101,14 +151,44 @@ export default function PodManager({ initialConfig }: { initialConfig: PodConfig
           toast(d.error || "Action failed", "err");
         }
       } else {
-        if (action === "set-host") {
-          setConfig((c) => ({ ...c, activePodId: podId, comfyuiHost: d.comfyui, ollamaHost: d.ollama, ttsHost: d.tts }));
-          toast(`Active host set to ${podId}`);
-        } else {
-          toast(`${action} successful`);
-        }
+        toast(`${action} successful`);
         await loadPods();
       }
+    } catch (e) {
+      toast(String(e), "err");
+    } finally {
+      setBusy(null);
+    }
+  };
+
+  const setHost = async (podId: string, selection: ServiceSelection) => {
+    setBusy(podId);
+    try {
+      const r = await fetch(`/api/admin/pods/${podId}/set-host`, {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ services: selection }),
+      });
+      const d = await r.json();
+      if (!r.ok || d.error) {
+        toast(d.error || "Failed to set host", "err");
+        return;
+      }
+      setConfig((c) => ({
+        ...c,
+        activePodId: d.activePodId ?? c.activePodId,
+        activeImagePodId: d.activeImagePodId,
+        activeVideoPodId: d.activeVideoPodId,
+        activeOllamaPodId: d.activeOllamaPodId,
+        activeTtsPodId: d.activeTtsPodId,
+        comfyuiHost: d.comfyui,
+        videoHost: d.video,
+        ollamaHost: d.ollama,
+        ttsHost: d.tts,
+      }));
+      const names = (selection === "all" ? SERVICE_ORDER : selection)
+        .map((s) => SERVICE_LABELS[s as PodService]).join(", ");
+      toast(`${names} → ${podId}`);
     } catch (e) {
       toast(String(e), "err");
     } finally {
@@ -159,15 +239,23 @@ export default function PodManager({ initialConfig }: { initialConfig: PodConfig
           <p style={{ color: "var(--muted)", fontSize: 13 }}>No pods found. Create one to get started.</p>
         ) : (
           <div style={{ display: "flex", flexDirection: "column", gap: 10 }}>
-            {pods.map((pod) => (
-              <PodRow
-                key={pod.id}
-                pod={pod}
-                isActive={config.activePodId === pod.id}
-                isBusy={busy === pod.id}
-                onAction={(action) => podAction(pod.id, action)}
-              />
-            ))}
+            {pods.map((pod) => {
+              const activeServices: PodService[] = [];
+              if (config.activeImagePodId  === pod.id) activeServices.push("image");
+              if (config.activeVideoPodId  === pod.id) activeServices.push("video");
+              if (config.activeTtsPodId    === pod.id) activeServices.push("tts");
+              if (config.activeOllamaPodId === pod.id) activeServices.push("ollama");
+              return (
+                <PodRow
+                  key={pod.id}
+                  pod={pod}
+                  activeServices={activeServices}
+                  isBusy={busy === pod.id}
+                  onAction={(action) => podAction(pod.id, action)}
+                  onSetHost={(sel) => setHost(pod.id, sel)}
+                />
+              );
+            })}
           </div>
         )}
       </section>
@@ -197,42 +285,79 @@ export default function PodManager({ initialConfig }: { initialConfig: PodConfig
 // ── Active Host Card ──────────────────────────────────────────────────────────
 
 function ActiveHostCard({ config }: { config: PodConfig }) {
+  const rows: { service: PodService; podId?: string; host?: string }[] = [
+    { service: "image",  podId: config.activeImagePodId,  host: config.comfyuiHost },
+    { service: "video",  podId: config.activeVideoPodId,  host: config.videoHost ?? config.comfyuiHost },
+    { service: "tts",    podId: config.activeTtsPodId,    host: config.ttsHost },
+    { service: "ollama", podId: config.activeOllamaPodId, host: config.ollamaHost },
+  ];
+  const anySet = rows.some((r) => r.podId || r.host);
+
   return (
-    <div style={{ padding: 16, borderRadius: 10, border: "1px solid var(--border)", background: "var(--bg-secondary, #f9fafb)" }}>
-      <div style={{ fontSize: 12, fontWeight: 700, color: "var(--muted)", textTransform: "uppercase", letterSpacing: 1, marginBottom: 10 }}>
-        Active Host
+    <div style={{ padding: 16, borderRadius: 10, border: "1px solid var(--border)", background: "var(--bg2, rgba(255,255,255,.03))" }}>
+      <div style={{ fontSize: 12, fontWeight: 700, color: "var(--text)", textTransform: "uppercase", letterSpacing: 1, marginBottom: 10 }}>
+        Active Hosts (per service)
       </div>
-      {config.activePodId ? (
-        <div style={{ display: "flex", flexDirection: "column", gap: 5 }}>
-          <div style={{ display: "flex", alignItems: "center", gap: 8 }}>
-            <span style={{ fontWeight: 600, fontSize: 14 }}>Pod: {config.activePodId}</span>
-          </div>
-          <div style={{ fontSize: 12, color: "var(--muted)", display: "flex", flexDirection: "column", gap: 2 }}>
-            <span>ComfyUI: {config.comfyuiHost ?? "—"}</span>
-            <span>Ollama: {config.ollamaHost ?? "—"}</span>
-            <span>TTS: {config.ttsHost ?? "—"}</span>
-          </div>
+      {anySet ? (
+        <div style={{ display: "grid", gridTemplateColumns: "140px auto 1fr", rowGap: 8, columnGap: 12, alignItems: "center", fontSize: 13 }}>
+          {rows.map((r) => (
+            <ServiceHostRow key={r.service} label={SERVICE_LABELS[r.service]} podId={r.podId} host={r.host} />
+          ))}
         </div>
       ) : (
         <p style={{ fontSize: 13, color: "var(--muted)", margin: 0 }}>
-          No active host selected. Click "Set as Host" on a running pod.
+          No active host selected. Use the &quot;Set as Host ▾&quot; menu on a running pod — pick &quot;All services&quot; or route a specific service (Image/Video, TTS, or Ollama) to that pod.
         </p>
       )}
     </div>
   );
 }
 
+function ServiceHostRow({ label, podId, host }: { label: string; podId?: string; host?: string }) {
+  const hasHost = !!host;
+  return (
+    <>
+      <span style={{ fontWeight: 600, color: "var(--text)" }}>{label}</span>
+      <code style={{
+        fontSize: 11,
+        background: podId ? "rgba(167,139,250,.15)" : "rgba(255,255,255,.06)",
+        color: podId ? "#a78bfa" : "var(--muted)",
+        padding: "2px 8px", borderRadius: 4, fontWeight: 700,
+        border: "1px solid " + (podId ? "rgba(167,139,250,.3)" : "var(--border)"),
+      }}>
+        {podId ?? "—"}
+      </code>
+      {hasHost ? (
+        <a href={host} target="_blank" rel="noreferrer"
+          style={{
+            color: "#60a5fa", textDecoration: "none", wordBreak: "break-all",
+            fontFamily: "monospace", fontSize: 12, fontWeight: 500,
+          }}
+          onMouseEnter={(e) => { (e.currentTarget as HTMLAnchorElement).style.textDecoration = "underline"; }}
+          onMouseLeave={(e) => { (e.currentTarget as HTMLAnchorElement).style.textDecoration = "none"; }}
+          title={`Open ${host} in a new tab`}>
+          {host} ↗
+        </a>
+      ) : (
+        <span style={{ color: "var(--muted)" }}>—</span>
+      )}
+    </>
+  );
+}
+
 // ── Pod Row ───────────────────────────────────────────────────────────────────
 
 function PodRow({
-  pod, isActive, isBusy, onAction,
+  pod, activeServices, isBusy, onAction, onSetHost,
 }: {
   pod: RunPodPod;
-  isActive: boolean;
+  activeServices: PodService[];
   isBusy: boolean;
-  onAction: (action: "start" | "stop" | "delete" | "set-host") => void;
+  onAction: (action: "start" | "stop" | "delete") => void;
+  onSetHost: (services: ServiceSelection) => void;
 }) {
   const isRunning = pod.desiredStatus === "RUNNING";
+  const isActive = activeServices.length > 0;
   const [showLog, setShowLog] = useState(false);
 
   return (
@@ -247,11 +372,11 @@ function PodRow({
             {statusDot(pod.desiredStatus)}
             <span style={{ fontWeight: 600, fontSize: 14 }}>{pod.name || pod.id}</span>
             <code style={{ fontSize: 11, color: "var(--muted)", background: "var(--border)", padding: "1px 6px", borderRadius: 4 }}>{pod.id}</code>
-            {isActive && (
-              <span style={{ fontSize: 11, fontWeight: 700, color: "var(--accent)", background: "rgba(99,102,241,0.1)", padding: "1px 6px", borderRadius: 4 }}>
-                ACTIVE HOST
+            {activeServices.map((s) => (
+              <span key={s} style={{ fontSize: 11, fontWeight: 700, color: "var(--accent)", background: "rgba(99,102,241,0.1)", padding: "1px 6px", borderRadius: 4 }}>
+                {SERVICE_LABELS[s]}
               </span>
-            )}
+            ))}
           </div>
           <div style={{ fontSize: 12, color: "var(--muted)", marginTop: 4, display: "flex", gap: 14, flexWrap: "wrap" }}>
             <span>{pod.machine?.gpuDisplayName ?? "GPU"}</span>
@@ -267,11 +392,11 @@ function PodRow({
         <div style={{ display: "flex", gap: 6, flexShrink: 0, flexWrap: "wrap", justifyContent: "flex-end" }}>
           {isRunning ? (
             <>
-              {!isActive && (
-                <Btn onClick={() => onAction("set-host")} disabled={isBusy} color="var(--accent)">
-                  Set as Host
-                </Btn>
-              )}
+              <SetHostMenu
+                disabled={isBusy}
+                activeServices={activeServices}
+                onSelect={(sel) => onSetHost(sel)}
+              />
               <Btn onClick={() => setShowLog((v) => !v)} disabled={false} color="#6b7280">
                 {showLog ? "Hide Log" : "View Log"}
               </Btn>
@@ -292,8 +417,165 @@ function PodRow({
         </div>
       </div>
 
+      {/* Readiness strip — only for running pods. When a pod is assigned to
+          specific services we only probe those, so a TTS-only pod doesn't
+          light up red for ComfyUI being absent. */}
+      {isRunning && <PodHealthStrip podId={pod.id} activeServices={activeServices} />}
+
       {/* Log viewer */}
       {showLog && isRunning && <LogViewer podId={pod.id} />}
+    </div>
+  );
+}
+
+// ── Pod Health Strip ─────────────────────────────────────────────────────────
+// Polls /api/admin/pods/[id]/health every 10s and shows per-service status +
+// clickable URLs so the user can tell when models are ready for testing.
+
+type Probe = { up: boolean; ms: number; error?: string };
+type HealthData = {
+  urls: { comfyui: string; ollama: string; tts: string };
+  services: { comfyui: Probe; ollama: Probe; tts: Probe };
+  models: { loaded: boolean; checkpointCount: number };
+};
+
+function PodHealthStrip({ podId, activeServices }: { podId: string; activeServices: PodService[] }) {
+  const [data, setData] = useState<HealthData | null>(null);
+  const [loading, setLoading] = useState(true);
+
+  // Which services we actually care about for this pod. A pod that hasn't been
+  // assigned to anything is still probed in full so the operator can see what
+  // it's capable of before deciding its role.
+  const services = activeServices.length > 0 ? activeServices : (["image", "video", "tts", "ollama"] as PodService[]);
+  const showComfy = services.includes("image") || services.includes("video");
+  const showTts = services.includes("tts");
+  const showOllama = services.includes("ollama");
+  const servicesKey = services.slice().sort().join(",");
+
+  useEffect(() => {
+    let cancel = false;
+    const load = async () => {
+      try {
+        const qs = new URLSearchParams({ services: servicesKey }).toString();
+        const r = await fetch(`/api/admin/pods/${podId}/health?${qs}`, { cache: "no-store" });
+        const d = await r.json();
+        if (!cancel) setData(d);
+      } catch {
+        // swallow — the strip just stays stale on a transient network blip
+      } finally {
+        if (!cancel) setLoading(false);
+      }
+    };
+    load();
+    const iv = setInterval(load, 10000);
+    return () => { cancel = true; clearInterval(iv); };
+  }, [podId, servicesKey]);
+
+  if (loading && !data) {
+    return (
+      <div style={{ marginTop: 10, fontSize: 11, color: "var(--muted)" }}>
+        Checking services…
+      </div>
+    );
+  }
+  if (!data) return null;
+
+  return (
+    <div style={{
+      marginTop: 10, padding: "8px 10px", borderRadius: 8, background: "rgba(0,0,0,0.03)",
+      display: "flex", flexWrap: "wrap", gap: 10, alignItems: "center", fontSize: 12,
+    }}>
+      {showComfy  && <HealthPill label="ComfyUI" probe={data.services.comfyui} url={data.urls.comfyui} />}
+      {showTts    && <HealthPill label="TTS"     probe={data.services.tts}     url={data.urls.tts} />}
+      {showOllama && <HealthPill label="Ollama"  probe={data.services.ollama}  url={data.urls.ollama} />}
+      {showComfy && (
+        <span style={{
+          padding: "2px 8px", borderRadius: 999, fontWeight: 600,
+          background: data.models.loaded ? "#dcfce7" : "#fef3c7",
+          color: data.models.loaded ? "#166534" : "#92400e",
+        }}>
+          {data.models.loaded
+            ? `Models ready (${data.models.checkpointCount} ckpts)`
+            : "Models downloading…"}
+        </span>
+      )}
+    </div>
+  );
+}
+
+function HealthPill({ label, probe, url }: { label: string; probe: Probe; url: string }) {
+  const color = probe.up ? "#22c55e" : "#ef4444";
+  const title = probe.up ? `${label} reachable (${probe.ms}ms) — click to open` : `${label} down: ${probe.error ?? "unreachable"}`;
+  return (
+    <a href={url} target="_blank" rel="noreferrer" title={title}
+      style={{ display: "inline-flex", alignItems: "center", gap: 6, textDecoration: "none", color: "inherit" }}>
+      <span style={{ display: "inline-block", width: 8, height: 8, borderRadius: "50%", background: color }} />
+      <span style={{ fontWeight: 600 }}>{label}</span>
+      <span style={{ color: "var(--muted)", fontSize: 11 }}>
+        {probe.up ? `${probe.ms}ms` : "down"}
+      </span>
+    </a>
+  );
+}
+
+function SetHostMenu({
+  disabled, activeServices, onSelect,
+}: {
+  disabled: boolean;
+  activeServices: PodService[];
+  onSelect: (services: ServiceSelection) => void;
+}) {
+  const [open, setOpen] = useState(false);
+  const ref = useRef<HTMLDivElement>(null);
+
+  useEffect(() => {
+    if (!open) return;
+    const close = (e: MouseEvent) => {
+      if (!ref.current?.contains(e.target as Node)) setOpen(false);
+    };
+    document.addEventListener("mousedown", close);
+    return () => document.removeEventListener("mousedown", close);
+  }, [open]);
+
+  const pick = (sel: ServiceSelection) => {
+    setOpen(false);
+    onSelect(sel);
+  };
+
+  const options: { label: string; sel: ServiceSelection; service?: PodService }[] = [
+    { label: "All services", sel: "all" },
+    ...SERVICE_ORDER.map((s) => ({ label: SERVICE_LABELS[s], sel: [s] as PodService[], service: s })),
+  ];
+
+  return (
+    <div ref={ref} style={{ position: "relative" }}>
+      <button type="button" disabled={disabled} onClick={() => setOpen((v) => !v)}
+        style={{ padding: "5px 12px", borderRadius: 6, border: `1px solid var(--accent)`, color: "var(--accent)", background: "transparent", cursor: disabled ? "not-allowed" : "pointer", fontSize: 12, fontWeight: 500, opacity: disabled ? 0.6 : 1 }}>
+        Set as Host ▾
+      </button>
+      {open && (
+        <div style={{
+          position: "absolute", top: "calc(100% + 4px)", right: 0, zIndex: 10, minWidth: 200,
+          background: "var(--bg)", border: "1px solid var(--border)", borderRadius: 8,
+          boxShadow: "0 8px 24px rgba(0,0,0,0.12)", overflow: "hidden",
+        }}>
+          {options.map((opt, i) => {
+            const isCurrent = opt.service ? activeServices.includes(opt.service) : false;
+            return (
+              <button key={i} type="button" onClick={() => pick(opt.sel)}
+                style={{
+                  display: "flex", alignItems: "center", justifyContent: "space-between",
+                  width: "100%", textAlign: "left", padding: "8px 12px", background: "transparent",
+                  border: "none", borderTop: i === 0 ? "none" : "1px solid var(--border)",
+                  cursor: "pointer", fontSize: 12, color: "var(--text)",
+                }}>
+                <span>{opt.label}</span>
+                {isCurrent && <span style={{ color: "var(--accent)", fontSize: 11, fontWeight: 700 }}>✓</span>}
+              </button>
+            );
+          })}
+        </div>
+      )}
     </div>
   );
 }
@@ -381,46 +663,80 @@ function CreatePodWizard({
   const [createdId, setCreatedId] = useState<string | null>(null);
   const [error, setError] = useState<string | null>(null);
   const [setAsHost, setSetAsHost] = useState(true);
+  const [canRetrySecure, setCanRetrySecure] = useState(false);
 
-  // Default GPU options if API returned nothing (cheapest first)
-  const defaultGpus: GpuType[] = [
-    { id: "NVIDIA GeForce RTX 3080", displayName: "RTX 3080 10GB", memoryInGb: 10, communityCloud: true, communityPrice: 0.17 },
-    { id: "NVIDIA GeForce RTX 3080 Ti", displayName: "RTX 3080 Ti 12GB", memoryInGb: 12, communityCloud: true, communityPrice: 0.22 },
-    { id: "NVIDIA RTX A4000", displayName: "RTX A4000 16GB", memoryInGb: 16, communityCloud: true, communityPrice: 0.20 },
-    { id: "NVIDIA GeForce RTX 4080", displayName: "RTX 4080 16GB", memoryInGb: 16, communityCloud: true, communityPrice: 0.39 },
-    { id: "NVIDIA RTX A5000", displayName: "RTX A5000 24GB", memoryInGb: 24, communityCloud: true, communityPrice: 0.36 },
-    { id: "NVIDIA GeForce RTX 3090", displayName: "RTX 3090 24GB", memoryInGb: 24, communityCloud: true, communityPrice: 0.49 },
-    { id: "NVIDIA RTX 4090", displayName: "RTX 4090 24GB", memoryInGb: 24, communityCloud: true, communityPrice: 0.69 },
-    { id: "NVIDIA RTX A6000", displayName: "RTX A6000 48GB", memoryInGb: 48, communityCloud: true, communityPrice: 0.79 },
-    { id: "NVIDIA L40", displayName: "L40 48GB", memoryInGb: 48, communityCloud: true, communityPrice: 0.99 },
-    { id: "NVIDIA A100 80GB PCIe", displayName: "A100 80GB PCIe", memoryInGb: 80, communityCloud: true, communityPrice: 1.19 },
-    { id: "NVIDIA A100-SXM4-80GB", displayName: "A100 80GB SXM", memoryInGb: 80, communityCloud: true, communityPrice: 2.19 },
-  ];
-  const options = gpuTypes.length > 0
-    ? [...gpuTypes]
-        .filter((g) => g.memoryInGb >= 10 && g.communityPrice && g.communityPrice > 0)
-        .sort((a, b) => (a.communityPrice ?? 0) - (b.communityPrice ?? 0))
-        .slice(0, 14)
-    : defaultGpus;
+  // Filters
+  const [minVram, setMinVram] = useState(24);
+  const [maxPrice, setMaxPrice] = useState(2.0);
+  const [hideLowStock, setHideLowStock] = useState(false);
+  const [cloudFilter, setCloudFilter] = useState<"any" | "community" | "secure">("any");
 
-  const createPod = async () => {
+  // Components to install. Derived "need comfyui" flag is auto-set when any model group is on.
+  type Components = { comfyui: boolean; tts: boolean; ollama: boolean; sdxl: boolean; flux: boolean; video: boolean };
+  const [comp, setComp] = useState<Components>({ comfyui: true, tts: true, ollama: true, sdxl: true, flux: true, video: true });
+  const effComfy = comp.comfyui || comp.sdxl || comp.flux || comp.video;
+  const applyPreset = (preset: "ollama_tts" | "image_sdxl" | "image_flux" | "video" | "full") => {
+    const presets: Record<string, Components> = {
+      ollama_tts:  { comfyui: false, tts: true, ollama: true,  sdxl: false, flux: false, video: false },
+      image_sdxl:  { comfyui: true,  tts: true, ollama: true,  sdxl: true,  flux: false, video: false },
+      image_flux:  { comfyui: true,  tts: true, ollama: true,  sdxl: false, flux: true,  video: false },
+      video:       { comfyui: true,  tts: true, ollama: true,  sdxl: false, flux: false, video: true },
+      full:        { comfyui: true,  tts: true, ollama: true,  sdxl: true,  flux: true,  video: true },
+    };
+    setComp(presets[preset]);
+  };
+
+  const options = [...gpuTypes]
+    .filter((g) => g.memoryInGb >= minVram)
+    .filter((g) => {
+      if (cloudFilter === "community") return !!(g.communityPrice && g.communityPrice > 0);
+      if (cloudFilter === "secure") return !!(g.securePrice && g.securePrice > 0);
+      return !!((g.communityPrice && g.communityPrice > 0) || (g.securePrice && g.securePrice > 0));
+    })
+    .filter((g) => {
+      const price = cloudFilter === "secure"
+        ? (g.securePrice ?? Infinity)
+        : (g.communityPrice ?? g.securePrice ?? Infinity);
+      return price <= maxPrice;
+    })
+    .filter((g) => !hideLowStock || g.stockStatus === "High" || g.stockStatus === "Medium")
+    .sort((a, b) => {
+      const ap = cloudFilter === "secure" ? (a.securePrice ?? 0) : (a.communityPrice ?? a.securePrice ?? 0);
+      const bp = cloudFilter === "secure" ? (b.securePrice ?? 0) : (b.communityPrice ?? b.securePrice ?? 0);
+      return ap - bp;
+    });
+
+  const createPod = async (cloudType: "COMMUNITY" | "SECURE" = "COMMUNITY") => {
     if (!selectedGpu) return;
     setStep("creating");
     setError(null);
+    setCanRetrySecure(false);
     try {
       const r = await fetch("/api/admin/pods", {
         method: "POST",
         headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({ gpuTypeId: selectedGpu.id }),
+        body: JSON.stringify({
+          gpuTypeId: selectedGpu.id,
+          cloudType,
+          components: { ...comp, comfyui: effComfy },
+        }),
       });
       const text = await r.text();
-      let d: { error?: string; pod?: { id: string } } = {};
+      let d: {
+        error?: string;
+        pod?: { id: string; cloudType?: string };
+        canRetrySecure?: boolean;
+        noCapacity?: boolean;
+      } = {};
       try {
         d = text ? JSON.parse(text) : {};
       } catch {
         throw new Error(text?.slice(0, 300) || `HTTP ${r.status}`);
       }
-      if (!r.ok || d.error) throw new Error(d.error || `HTTP ${r.status}`);
+      if (!r.ok || d.error) {
+        if (d.canRetrySecure) setCanRetrySecure(true);
+        throw new Error(d.error || `HTTP ${r.status}`);
+      }
       const podId = d.pod?.id;
       if (!podId) throw new Error("Pod created but no id returned");
       setCreatedId(podId);
@@ -461,9 +777,94 @@ function CreatePodWizard({
 
         {step === "select" && (
           <>
-            <p style={{ fontSize: 13, color: "var(--muted)", margin: "0 0 16px" }}>
-              Select a GPU type. The pod will install ComfyUI, Wan 2.1, and all models automatically.
+            <p style={{ fontSize: 13, color: "var(--muted)", margin: "0 0 8px" }}>
+              Select a GPU ({options.length} in stock). Pod auto-installs ComfyUI, Wan 2.1, and all models.
             </p>
+            <details style={{ margin: "0 0 14px", fontSize: 12 }}>
+              <summary style={{ cursor: "pointer", color: "var(--muted)" }}>What's Community vs Secure cloud?</summary>
+              <div style={{ padding: "8px 10px", marginTop: 6, borderRadius: 6, background: "rgba(0,0,0,0.03)", lineHeight: 1.5 }}>
+                <b>Community Cloud</b> — GPUs hosted by individual providers. Cheaper (often 30–50% less), but capacity/uptime varies and machines may be interrupted.<br />
+                <b>Secure Cloud</b> — RunPod's own datacenters. More expensive, but guaranteed uptime and consistent performance. Used automatically as fallback if Community has no capacity.
+              </div>
+            </details>
+            {/* Filters */}
+            <div style={{
+              display: "flex", flexWrap: "wrap", gap: 10, padding: "10px 12px",
+              borderRadius: 8, background: "rgba(0,0,0,0.03)", marginBottom: 12, fontSize: 12, alignItems: "center",
+            }}>
+              <label style={{ display: "flex", alignItems: "center", gap: 6 }}>
+                Min VRAM
+                <select value={minVram} onChange={(e) => setMinVram(Number(e.target.value))}
+                  style={{ padding: "3px 8px", borderRadius: 4, border: "1px solid var(--border)", fontSize: 12, background: "var(--bg)" }}>
+                  <option value={0}>Any</option>
+                  <option value={10}>10GB+</option>
+                  <option value={16}>16GB+</option>
+                  <option value={24}>24GB+</option>
+                  <option value={40}>40GB+</option>
+                  <option value={80}>80GB+</option>
+                </select>
+              </label>
+              <label style={{ display: "flex", alignItems: "center", gap: 6 }}>
+                Max $/hr
+                <input type="number" min={0.1} max={10} step={0.1} value={maxPrice}
+                  onChange={(e) => setMaxPrice(Number(e.target.value) || 10)}
+                  style={{ width: 60, padding: "3px 8px", borderRadius: 4, border: "1px solid var(--border)", fontSize: 12, background: "var(--bg)" }} />
+              </label>
+              <label style={{ display: "flex", alignItems: "center", gap: 6 }}>
+                Cloud
+                <select value={cloudFilter} onChange={(e) => setCloudFilter(e.target.value as "any" | "community" | "secure")}
+                  style={{ padding: "3px 8px", borderRadius: 4, border: "1px solid var(--border)", fontSize: 12, background: "var(--bg)" }}>
+                  <option value="any">Any</option>
+                  <option value="community">Community only</option>
+                  <option value="secure">Secure only</option>
+                </select>
+              </label>
+              <label style={{ display: "flex", alignItems: "center", gap: 5, cursor: "pointer" }}>
+                <input type="checkbox" checked={hideLowStock} onChange={(e) => setHideLowStock(e.target.checked)} />
+                Hide low stock
+              </label>
+              <span style={{ marginLeft: "auto", color: "var(--muted)" }}>
+                {options.length} of {gpuTypes.length} match
+              </span>
+            </div>
+
+            {options.length === 0 && (
+              <div style={{ padding: 12, borderRadius: 8, background: "#fef3c7", color: "#92400e", fontSize: 13, marginBottom: 12 }}>
+                No GPUs match your filters. Loosen them above, or refresh in a minute if <code>RUNPOD_API_KEY</code> may have stalled.
+              </div>
+            )}
+
+            {/* Component picker — presets + per-component checkboxes */}
+            <div style={{ marginBottom: 14, padding: "10px 12px", borderRadius: 8, border: "1px solid var(--border)" }}>
+              <div style={{ fontSize: 12, fontWeight: 700, color: "var(--muted)", textTransform: "uppercase", letterSpacing: 0.5, marginBottom: 8 }}>
+                Components to install
+              </div>
+              <div style={{ display: "flex", flexWrap: "wrap", gap: 6, marginBottom: 10 }}>
+                {[
+                  { id: "ollama_tts", label: "Ollama + TTS",    hint: "~5 GB · 3 min"  },
+                  { id: "image_sdxl", label: "Image (SDXL)",    hint: "~20 GB · 15 min" },
+                  { id: "image_flux", label: "Image (FLUX)",    hint: "~30 GB · 20 min" },
+                  { id: "video",      label: "Video (Wan 2.1)", hint: "~30 GB · 20 min" },
+                  { id: "full",       label: "Everything",      hint: "~70 GB · 30 min" },
+                ].map((p) => (
+                  <button key={p.id} type="button"
+                    onClick={() => applyPreset(p.id as "ollama_tts" | "image_sdxl" | "image_flux" | "video" | "full")}
+                    title={p.hint}
+                    style={{ padding: "5px 10px", borderRadius: 6, border: "1px solid var(--border)", background: "transparent", cursor: "pointer", fontSize: 12 }}>
+                    {p.label}
+                  </button>
+                ))}
+              </div>
+              <div style={{ display: "grid", gridTemplateColumns: "1fr 1fr", gap: 4, fontSize: 12 }}>
+                <CompCheckbox label="Ollama (LLM)"             checked={comp.ollama} onChange={(v) => setComp((c) => ({ ...c, ollama: v }))} />
+                <CompCheckbox label="TTS (edge-tts)"           checked={comp.tts}    onChange={(v) => setComp((c) => ({ ...c, tts: v }))} />
+                <CompCheckbox label="ComfyUI base (auto if models)" checked={effComfy} disabled={comp.sdxl || comp.flux || comp.video}
+                  onChange={(v) => setComp((c) => ({ ...c, comfyui: v }))} />
+                <CompCheckbox label="SDXL models (~10 GB)"     checked={comp.sdxl}   onChange={(v) => setComp((c) => ({ ...c, sdxl: v }))} />
+                <CompCheckbox label="FLUX models (~20 GB)"     checked={comp.flux}   onChange={(v) => setComp((c) => ({ ...c, flux: v }))} />
+                <CompCheckbox label="Wan 2.1 video (~20 GB)"   checked={comp.video}  onChange={(v) => setComp((c) => ({ ...c, video: v }))} />
+              </div>
+            </div>
             <div style={{ display: "flex", flexDirection: "column", gap: 8 }}>
               {options.map((gpu) => (
                 <label key={gpu.id} style={{
@@ -477,14 +878,22 @@ function CreatePodWizard({
                     style={{ accentColor: "var(--accent)" }}
                   />
                   <div style={{ flex: 1 }}>
-                    <div style={{ fontWeight: 600, fontSize: 14 }}>{gpu.displayName}</div>
-                    <div style={{ fontSize: 12, color: "var(--muted)" }}>{gpu.memoryInGb}GB VRAM · Community Cloud</div>
-                  </div>
-                  {gpu.communityPrice && (
-                    <div style={{ fontSize: 13, fontWeight: 600 }}>
-                      ~${gpu.communityPrice.toFixed(2)}/hr
+                    <div style={{ fontWeight: 600, fontSize: 14, display: "flex", alignItems: "center", gap: 8 }}>
+                      {gpu.displayName}
+                      <StockBadge level={gpu.stockStatus} />
                     </div>
-                  )}
+                    <div style={{ fontSize: 12, color: "var(--muted)" }}>
+                      {gpu.memoryInGb}GB VRAM
+                    </div>
+                  </div>
+                  <div style={{ fontSize: 12, textAlign: "right", lineHeight: 1.5 }}>
+                    {gpu.communityPrice && gpu.communityPrice > 0 && (
+                      <div><b>${gpu.communityPrice.toFixed(2)}</b>/hr <span style={{ color: "var(--muted)" }}>Community</span></div>
+                    )}
+                    {gpu.securePrice != null && gpu.securePrice > 0 && (
+                      <div style={{ color: "var(--muted)" }}>${gpu.securePrice.toFixed(2)}/hr Secure</div>
+                    )}
+                  </div>
                 </label>
               ))}
             </div>
@@ -494,11 +903,17 @@ function CreatePodWizard({
               Set as active host after creation
             </label>
 
-            <div style={{ display: "flex", gap: 8, marginTop: 20, justifyContent: "flex-end" }}>
+            <div style={{ display: "flex", gap: 8, marginTop: 20, justifyContent: "flex-end", flexWrap: "wrap" }}>
               <button onClick={onClose} style={{ padding: "8px 16px", borderRadius: 8, border: "1px solid var(--border)", background: "transparent", cursor: "pointer", fontSize: 13 }}>
                 Cancel
               </button>
-              <button onClick={createPod} disabled={!selectedGpu}
+              {canRetrySecure && selectedGpu?.securePrice && (
+                <button onClick={() => createPod("SECURE")}
+                  style={{ padding: "8px 16px", borderRadius: 8, border: "1px solid #f59e0b", background: "transparent", color: "#b45309", cursor: "pointer", fontSize: 13, fontWeight: 600 }}>
+                  Retry on Secure (${selectedGpu.securePrice.toFixed(2)}/hr)
+                </button>
+              )}
+              <button onClick={() => createPod("COMMUNITY")} disabled={!selectedGpu}
                 style={{ padding: "8px 20px", borderRadius: 8, border: "none", background: selectedGpu ? "var(--accent)" : "var(--border)", color: selectedGpu ? "#fff" : "var(--muted)", cursor: selectedGpu ? "pointer" : "not-allowed", fontSize: 13, fontWeight: 600 }}>
                 Create Pod →
               </button>

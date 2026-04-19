@@ -1,10 +1,9 @@
 import { load } from "@/lib/db";
 import { prisma } from "@/lib/prisma";
-import { queuePrompt, buildWan2_1_I2VWorkflow, buildWan2_1_I2VWorkflow_14B, buildI2VWorkflow, uploadImage, getHost, type VideoQualityPreset, VIDEO_QUALITY_PRESETS } from "@/lib/comfyui";
+import { queuePrompt, buildWan2_1_I2VWorkflow, buildWan2_1_I2VWorkflow_14B, buildI2VWorkflow, uploadImage, getVideoHost, resolveAvailableCheckpoint, type VideoQualityPreset, VIDEO_QUALITY_PRESETS } from "@/lib/comfyui";
 import { getPodConfig } from "@/lib/pod-config";
+import { fetchGenerated } from "@/lib/storage";
 import { randomUUID } from "crypto";
-import path from "path";
-import fs from "fs";
 
 // Calculate frames from audio duration at 24fps
 function calculateFramesFromAudio(audioDurationMs: number): number {
@@ -41,7 +40,7 @@ export async function POST(req: Request, { params }: { params: Promise<{ id: str
     return Response.json({ ok: true, queued: 0, skipped: true, reason: "Already generating" });
   }
 
-  const host = getHost();
+  const host = getVideoHost();
   const project = db.projects.find((p) => p.id === shot.project_id);
   const modelOverride = project?.pipeline_model;
   const configPreset = getPodConfig().videoQualityPreset ?? "balanced";
@@ -55,17 +54,14 @@ export async function POST(req: Request, { params }: { params: Promise<{ id: str
   // Auto-calculate frames from TTS audio if no explicit duration provided
   if (!durationFrames && shot.audio_path) {
     try {
-      const audioAbsPath = path.join(process.cwd(), "public", shot.audio_path.replace(/^\//, ""));
-      if (fs.existsSync(audioAbsPath)) {
-        const buf = fs.readFileSync(audioAbsPath);
-        if (buf.length >= 44) {
-          const dataSize = buf.readUInt32LE(40);
-          const sampleRate = buf.readUInt32LE(24);
-          const channels = buf.readUInt16LE(22);
-          const bitsPerSample = buf.readUInt16LE(34);
-          const durationMs = Math.round((dataSize / (sampleRate * channels * (bitsPerSample / 8))) * 1000);
-          if (durationMs > 500) durationFrames = calculateFramesFromAudio(durationMs);
-        }
+      const buf = await fetchGenerated(shot.audio_path);
+      if (buf.length >= 44) {
+        const dataSize = buf.readUInt32LE(40);
+        const sampleRate = buf.readUInt32LE(24);
+        const channels = buf.readUInt16LE(22);
+        const bitsPerSample = buf.readUInt16LE(34);
+        const durationMs = Math.round((dataSize / (sampleRate * channels * (bitsPerSample / 8))) * 1000);
+        if (durationMs > 500) durationFrames = calculateFramesFromAudio(durationMs);
       }
     } catch { /* fall through to default */ }
   }
@@ -81,15 +77,19 @@ export async function POST(req: Request, { params }: { params: Promise<{ id: str
       const approvedGen = db.generations.find((g) => g.id === approvedId);
       if (!approvedGen?.image_path) { errors.push(`${approvedId}: no image path`); continue; }
 
-      const absPath = path.join(process.cwd(), "public", approvedGen.image_path.replace(/^\//, ""));
-      if (!fs.existsSync(absPath)) { errors.push(`${approvedId}: file not found`); continue; }
+      let imgBuffer: Buffer;
+      try {
+        imgBuffer = await fetchGenerated(approvedGen.image_path);
+      } catch (e) {
+        errors.push(`${approvedId}: ${e instanceof Error ? e.message : String(e)}`);
+        continue;
+      }
 
       let prompt_id: string | null = null;
       let genType = "video";
       let genStatus = "running";
 
       // Always upload image first — needed for I2V; also used by SDXL fallback
-      const imgBuffer = fs.readFileSync(absPath);
       const imgName = `shot_${shot.id}_${approvedId.slice(0, 8)}.png`;
 
       let i2vError: string | null = null;
@@ -106,13 +106,29 @@ export async function POST(req: Request, { params }: { params: Promise<{ id: str
           i2vError = wanErr instanceof Error ? wanErr.message : String(wanErr);
           const msg = i2vError;
           if (msg.includes("wan2.1-i2v-14b") || msg.includes("not in list") || msg.includes("T2V") || msg.includes("t2v") || msg.includes("validation")) {
-            // I2V model not available or validation failed — use T2V text-driven fallback
-            const t2vWf = buildWan2_1_I2VWorkflow(shot.full_prompt, "", seed, durationFrames, modelOverride);
-            prompt_id = (await queuePrompt(t2vWf, host)).prompt_id;
-            genType = "video:t2v_fallback";
+            // I2V model not available or validation failed — use T2V text-driven fallback.
+            // If T2V also fails (e.g. pod has no Wan models at all), drop to SDXL img2img.
+            try {
+              const t2vWf = buildWan2_1_I2VWorkflow(shot.full_prompt, "", seed, durationFrames, modelOverride);
+              prompt_id = (await queuePrompt(t2vWf, host)).prompt_id;
+              genType = "video:t2v_fallback";
+            } catch (t2vErr) {
+              const t2vMsg = t2vErr instanceof Error ? t2vErr.message : String(t2vErr);
+              if (t2vMsg.includes("not in list") || t2vMsg.includes("WanVideoModelLoader") || t2vMsg.includes("missing_node_type") || t2vMsg.includes("validation")) {
+                const ckpt = await resolveAvailableCheckpoint(modelOverride, host);
+                const fallbackWf = buildI2VWorkflow(shot.full_prompt, uploadData.name, seed, durationFrames, ckpt);
+                prompt_id = (await queuePrompt(fallbackWf, host)).prompt_id;
+                genType = "video:i2v_fallback";
+              } else {
+                throw t2vErr;
+              }
+            }
           } else if (msg.includes("WanVideoModelLoader") || msg.includes("missing_node_type") || msg.includes("Node 'Wan")) {
-            // WanVideo nodes not installed — SDXL img2img last resort
-            const fallbackWf = buildI2VWorkflow(shot.full_prompt, uploadData.name, seed, durationFrames, null);
+            // WanVideo nodes not installed — SDXL img2img last resort.
+            // Query the pod's actual checkpoint catalog so we don't hit "value_not_in_list"
+            // when the env default (e.g. flux1-schnell) isn't loaded on an SDXL-only pod.
+            const ckpt = await resolveAvailableCheckpoint(modelOverride, host);
+            const fallbackWf = buildI2VWorkflow(shot.full_prompt, uploadData.name, seed, durationFrames, ckpt);
             prompt_id = (await queuePrompt(fallbackWf, host)).prompt_id;
             genType = "video:i2v_fallback";
           } else if (msg.includes("aborted") || msg.includes("fetch failed") || msg.includes("ECONNRESET") || msg.includes("ETIMEDOUT")) {
@@ -162,7 +178,29 @@ export async function POST(req: Request, { params }: { params: Promise<{ id: str
       if (prompt_id) queued.push(prompt_id);
       else if (genStatus === "queued") queued.push("queued:" + id);
     } catch (err) {
-      errors.push(`${approvedId}: ${err instanceof Error ? err.message : String(err)}`);
+      const errMsg = err instanceof Error ? err.message : String(err);
+      errors.push(`${approvedId}: ${errMsg}`);
+      // Persist a failed generation record so the UI shows a visible failure tile
+      // instead of the spinner silently disappearing with no trace.
+      try {
+        const approvedGen = db.generations.find((g) => g.id === approvedId);
+        await prisma.generation.create({
+          data: {
+            id: randomUUID(),
+            shot_id: id,
+            type: "video",
+            comfyui_prompt_id: null,
+            status: "failed",
+            seed,
+            image_path: approvedGen?.image_path ?? null,
+            video_path: null,
+            audio_path: shot.audio_path ?? null,
+            error: errMsg.slice(0, 500),
+            created_at: new Date().toISOString(),
+            completed_at: new Date().toISOString(),
+          },
+        });
+      } catch { /* best-effort */ }
     }
   }
 

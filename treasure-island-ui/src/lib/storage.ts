@@ -115,3 +115,47 @@ export function generatedExists(filePathOrUrl: string): boolean {
   try { return fs.existsSync(toLocalPath(filePathOrUrl)); }
   catch { return false; }
 }
+
+/**
+ * Fetch a generated file as a Buffer. Tries local disk first, falls back to CDN
+ * when the file isn't present locally (e.g. running dev against a prod DB where
+ * assets live only on DO Spaces). Throws a descriptive error if neither works.
+ */
+export async function fetchGenerated(filePathOrUrl: string): Promise<Buffer> {
+  const localPath = toLocalPath(filePathOrUrl);
+  if (fs.existsSync(localPath)) return fs.readFileSync(localPath);
+
+  const cdnUrl = toPublicUrl(filePathOrUrl);
+  if (!cdnUrl.startsWith("http")) {
+    throw new Error(`file not found locally and no CDN configured: ${filePathOrUrl}`);
+  }
+  const res = await fetch(cdnUrl);
+  if (!res.ok) {
+    throw new Error(`file not found locally and CDN returned ${res.status}: ${filePathOrUrl}`);
+  }
+  return Buffer.from(await res.arrayBuffer());
+}
+
+/**
+ * Resolve a `/generated/...` path to an absolute local filesystem path, downloading
+ * from the DO Spaces CDN into `public/generated/...` if it's not already present.
+ * Returns the local path. Use this whenever a server-side tool (ffmpeg etc.) needs
+ * the file on disk. The download doubles as a local cache for later requests.
+ */
+export async function ensureLocalFile(filePathOrUrl: string): Promise<string> {
+  const localPath = toLocalPath(filePathOrUrl);
+  if (fs.existsSync(localPath)) return localPath;
+
+  const cdnUrl = toPublicUrl(filePathOrUrl);
+  if (!cdnUrl.startsWith("http")) {
+    throw new Error(`file not found locally and no CDN configured: ${filePathOrUrl}`);
+  }
+  const res = await fetch(cdnUrl);
+  if (!res.ok) {
+    throw new Error(`file not found locally and CDN returned ${res.status}: ${filePathOrUrl}`);
+  }
+  const buf = Buffer.from(await res.arrayBuffer());
+  fs.mkdirSync(path.dirname(localPath), { recursive: true });
+  fs.writeFileSync(localPath, buf);
+  return localPath;
+}

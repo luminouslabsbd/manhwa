@@ -3,18 +3,21 @@ import { useState } from "react";
 
 type HostConfig = {
   comfyuiHost: string;
+  videoHost: string;
   ollamaHost: string;
   ttsHost: string;
 };
 
 const PLACEHOLDERS: Record<keyof HostConfig, string> = {
   comfyuiHost: "http://localhost:8188",
+  videoHost:   "(falls back to ComfyUI Host)",
   ollamaHost:  "http://localhost:11434",
   ttsHost:     "http://localhost:5000",
 };
 
 const ENVFALLBACKS: Record<keyof HostConfig, string> = {
   comfyuiHost: "COMFYUI_HOST → http://localhost:8188",
+  videoHost:   "falls back to ComfyUI Host, then VIDEO_HOST / COMFYUI_HOST env",
   ollamaHost:  "OLLAMA_HOST → http://localhost:11434",
   ttsHost:     "TTS_HOST → http://localhost:5000",
 };
@@ -52,8 +55,13 @@ export default function HostConfigForm({ initial }: { initial: HostConfig }) {
   const sections: { key: keyof HostConfig; label: string; description: string }[] = [
     {
       key: "comfyuiHost",
-      label: "ComfyUI Host",
-      description: "Used for image and video generation (ComfyUI + WAN 2.1 workflows).",
+      label: "ComfyUI Host (Image)",
+      description: "ComfyUI server used for image generation (SDXL / FLUX workflows).",
+    },
+    {
+      key: "videoHost",
+      label: "ComfyUI Host (Video)",
+      description: "Optional: ComfyUI server used for video workflows (WAN 2.1). Leave empty to reuse the image host.",
     },
     {
       key: "ttsHost",

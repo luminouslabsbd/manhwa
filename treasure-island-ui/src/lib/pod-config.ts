@@ -5,11 +5,22 @@ const CONFIG_PATH = path.join(process.cwd(), ".pod-config.json");
 
 export type VideoQualityPreset = "fast" | "balanced" | "smooth";
 
+export type PodService = "image" | "video" | "ollama" | "tts";
+
 export interface PodConfig {
   activePodId?: string;
+  // comfyuiHost is the ComfyUI proxy used for image generation.
   comfyuiHost?: string;
+  // videoHost is a separate ComfyUI proxy used for video workflows (Wan 2.1 etc).
+  // Falls back to comfyuiHost when unset, so existing single-pod setups keep working.
+  videoHost?: string;
   ollamaHost?: string;
   ttsHost?: string;
+  // Per-service pod IDs — let each service point to a different pod.
+  activeImagePodId?: string;
+  activeVideoPodId?: string;
+  activeOllamaPodId?: string;
+  activeTtsPodId?: string;
   idleStopEnabled: boolean;
   idleStopMinutes: number;
   lastActivityAt?: string; // ISO timestamp — last time queue had jobs
@@ -42,6 +53,12 @@ export function savePodConfig(updates: Partial<PodConfig>): PodConfig {
 export function resolveComfyUIHost(): string {
   const cfg = getPodConfig();
   return cfg.comfyuiHost || process.env.COMFYUI_HOST || "http://localhost:8188";
+}
+
+/** Host used for video workflows. Falls back to image host if not set separately. */
+export function resolveVideoHost(): string {
+  const cfg = getPodConfig();
+  return cfg.videoHost || cfg.comfyuiHost || process.env.VIDEO_HOST || process.env.COMFYUI_HOST || "http://localhost:8188";
 }
 
 export function resolveOllamaHost(): string {

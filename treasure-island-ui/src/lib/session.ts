@@ -13,6 +13,7 @@ export type SessionPayload = {
   email: string;
   name: string;
   role: "SUPERADMIN" | "USER";
+  impersonator?: { userId: string; name: string; email: string };
 };
 
 export async function verifyToken(token: string): Promise<SessionPayload | null> {

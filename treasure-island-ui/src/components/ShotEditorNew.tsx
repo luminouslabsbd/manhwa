@@ -186,9 +186,15 @@ export default function ShotEditorNew({ shot, onClose, onSaved }: {
         }),
       });
 
+      const data = await res.json().catch(() => ({}));
       if (!res.ok) {
-        const errData = await res.json();
-        throw new Error(errData.error || "Video generation failed");
+        throw new Error(data.error || "Video generation failed");
+      }
+      if (data.queued === 0 && data.errors?.length) {
+        throw new Error(data.errors[0]);
+      }
+      if (data.queued === 0 && data.pending === 0) {
+        throw new Error("Video generation produced no results");
       }
 
       await mutateDetail();

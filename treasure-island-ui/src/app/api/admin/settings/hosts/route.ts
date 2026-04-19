@@ -5,6 +5,7 @@ export async function GET() {
   const cfg = getPodConfig();
   return Response.json({
     comfyuiHost: cfg.comfyuiHost ?? "",
+    videoHost: cfg.videoHost ?? "",
     ollamaHost: cfg.ollamaHost ?? "",
     ttsHost: cfg.ttsHost ?? "",
   });
@@ -15,12 +16,14 @@ export async function PATCH(req: NextRequest) {
   const updates: Record<string, string | undefined> = {};
 
   if (typeof body.comfyuiHost === "string") updates.comfyuiHost = body.comfyuiHost.trim() || undefined;
-  if (typeof body.ollamaHost === "string") updates.ollamaHost = body.ollamaHost.trim() || undefined;
-  if (typeof body.ttsHost === "string") updates.ttsHost = body.ttsHost.trim() || undefined;
+  if (typeof body.videoHost === "string")   updates.videoHost   = body.videoHost.trim()   || undefined;
+  if (typeof body.ollamaHost === "string")  updates.ollamaHost  = body.ollamaHost.trim()  || undefined;
+  if (typeof body.ttsHost === "string")     updates.ttsHost     = body.ttsHost.trim()     || undefined;
 
   const saved = savePodConfig(updates);
   return Response.json({
     comfyuiHost: saved.comfyuiHost ?? "",
+    videoHost: saved.videoHost ?? "",
     ollamaHost: saved.ollamaHost ?? "",
     ttsHost: saved.ttsHost ?? "",
   });
