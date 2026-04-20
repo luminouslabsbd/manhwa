@@ -1,6 +1,7 @@
 import { prisma } from "@/lib/prisma";
 import { queuePrompt, buildImageWorkflow, getHost, type LoraSpec } from "@/lib/comfyui";
 import { randomUUID } from "crypto";
+import { resolveActiveImageModel } from "@/lib/active-image-model";
 
 export async function POST(req: Request, { params }: { params: Promise<{ id: string }> }) {
   const { id } = await params;
@@ -10,13 +11,26 @@ export async function POST(req: Request, { params }: { params: Promise<{ id: str
   if (!char) return Response.json({ error: "Not found" }, { status: 404 });
 
   const project = await prisma.project.findUnique({ where: { id: char.project_id } });
-  const modelOverride: string | null = body.model ?? char.pipeline_model ?? project?.pipeline_model ?? null;
+  // Same four-step resolution as /api/shots/[id]/generate — catalog active
+  // model is consulted when no per-character/project override exists.
+  const activeModel = await resolveActiveImageModel(body.model_id);
+  const modelOverride: string | null =
+    body.model
+      ?? char.pipeline_model
+      ?? project?.pipeline_model
+      ?? activeModel?.ckpt
+      ?? null;
+  const p = activeModel?.params ?? {};
+  const effSteps  = typeof p.steps  === "number" ? p.steps  : 25;
+  const effWidth  = typeof p.width  === "number" ? p.width  : 768;
+  const effHeight = typeof p.height === "number" ? p.height : 1024;
+
   const loras: LoraSpec[] | undefined = body.loras;
   const seed = body.seed ?? Math.floor(Math.random() * 999999);
   const prompt = char.reference_prompt || buildCharacterPrompt(char);
 
   try {
-    const wf = buildImageWorkflow(prompt, seed, 768, 1024, 25, modelOverride, loras);
+    const wf = buildImageWorkflow(prompt, seed, effWidth, effHeight, effSteps, modelOverride, loras);
     const { prompt_id } = await queuePrompt(wf, getHost());
     const genId = randomUUID();
 

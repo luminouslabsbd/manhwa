@@ -163,8 +163,16 @@ export async function GET() {
 
       const outputs = entry.outputs ?? {};
       for (const nodeOut of Object.values(outputs) as Record<string, unknown>[]) {
+        // Some ComfyUI video nodes (e.g. the LTX-Video 2 VideoSave node) emit
+        // the rendered mp4 inside `outputs.images` with `animated: true`
+        // rather than under `.gifs`. Split the images array so animated
+        // entries take the video path and stills stay on the image path.
+        const rawImgs = (nodeOut.images ?? []) as Array<{ filename: string; subfolder: string; animated?: boolean }>;
+        const videoImgs = rawImgs.filter((i) => i.animated || /\.(mp4|webm|mov)$/i.test(i.filename));
+        const stillImgs = rawImgs.filter((i) => !videoImgs.includes(i));
+
         // ── Image outputs ──
-        for (const img of ((nodeOut.images ?? []) as Array<{ filename: string; subfolder: string }>)) {
+        for (const img of stillImgs) {
           const buf = await fetchImageAsBase64(img.filename, img.subfolder, host);
           const fname = isBaseImage ? "base.png" : `${gen.id}.png`;
           const filePath = await saveGenerated(buf, projectId, fname);
@@ -215,7 +223,11 @@ export async function GET() {
         }
 
         // ── Video outputs ──
-        for (const vid of ((nodeOut.gifs ?? []) as Array<{ filename: string; subfolder: string }>)) {
+        // Merge `.gifs` (older VHS_VideoCombine node) with mp4-in-images
+        // (newer LTX2 VideoSave node) so both paths land here.
+        const gifs = (nodeOut.gifs ?? []) as Array<{ filename: string; subfolder: string }>;
+        const videoEntries = [...gifs, ...videoImgs];
+        for (const vid of videoEntries) {
           const buf = await fetchImageAsBase64(vid.filename, vid.subfolder, host);
           const fname = `${gen.id}.mp4`;
           const videoPath = await saveGenerated(buf, projectId, fname);

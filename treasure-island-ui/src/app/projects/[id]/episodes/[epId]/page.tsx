@@ -604,7 +604,7 @@ function Lightbox({ items, index, onClose, onPrev, onNext, onJump, onApprove, on
                   style={{ width: "100%", padding: "10px 0", fontSize: 12, fontWeight: 700, borderRadius: 9, border: "none", display: "flex", alignItems: "center", justifyContent: "center", gap: 7, background: !item.approvedImageId ? "rgba(255,255,255,.08)" : videoGenerating ? "rgba(124,58,237,.5)" : "#7c3aed", color: !item.approvedImageId ? "rgba(255,255,255,.3)" : "#fff", cursor: !item.approvedImageId || videoGenerating ? "not-allowed" : "pointer", transition: "background .2s" }}>
                   {videoGenerating
                     ? <><span className="spinner" style={{ width: 14, height: 14, borderWidth: 2, borderColor: "#fff transparent transparent transparent" }} /> Queuing render…</>
-                    : !item.approvedImageId ? "Approve image first" : "🎬 AI Video (WAN)"}
+                    : !item.approvedImageId ? "Approve image first" : item.approvedVideoId ? "🎬 Regenerate Video" : "🎬 Generate Video"}
                 </button>
 
                 {/* ── Self-hosted motion effects ── */}
@@ -1234,7 +1234,9 @@ export default function EpisodePage() {
   }
 
   async function generateVideo(shotId: string, preset = "balanced") {
-    const res = await fetch(`/api/shots/${shotId}/generate-video`, { method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify({ preset }) });
+    // `force: true` makes the API supersede any orphan "running" record
+    // (pod restart/crash) so regeneration always proceeds from this button.
+    const res = await fetch(`/api/shots/${shotId}/generate-video`, { method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify({ preset, force: true }) });
     const d = await res.json();
     if (!res.ok) { toast(`Video error: ${d.error}`, "error"); }
     else if (d.skipped) { toast("Already generating — wait for current render to finish", "warning"); }
@@ -1261,6 +1263,18 @@ export default function EpisodePage() {
       if (data.errors?.length) console.warn("Video generation errors:", data.errors);
     } catch (e) { toast("Error: " + String(e), "error"); }
     setVidLoading(false);
+    mutate();
+  }
+
+  async function cleanupStale() {
+    try {
+      const res = await fetch(`/api/episodes/${epId}/cleanup-stale`, { method: "POST" });
+      const data = await res.json();
+      if (!res.ok) { toast(`Cleanup failed: ${data.error ?? res.statusText}`, "error"); return; }
+      if (data.cleaned === 0) { toast("No stuck generations — nothing to clean.", "info"); return; }
+      const parts = Object.entries(data.byType as Record<string, number>).map(([t, n]) => `${t}: ${n}`).join(", ");
+      toast(`Unstuck ${data.cleaned} generation${data.cleaned === 1 ? "" : "s"} (${parts})`, "success");
+    } catch (e) { toast("Error: " + String(e), "error"); }
     mutate();
   }
 
@@ -1520,6 +1534,13 @@ export default function EpisodePage() {
           </button>
           <button className="btn btn-secondary btn-sm" onClick={generateAllTTS} disabled={ttsVidLoading}>
             {ttsVidLoading ? <span className="spinner" /> : "🎙"} TTS
+          </button>
+          <button
+            className="btn btn-sm"
+            onClick={cleanupStale}
+            title="Mark any generation stuck in 'running' for >15min as failed, so regeneration works again (e.g. after a pod restart)."
+            style={{ background: "rgba(245,158,11,.1)", color: "#f59e0b", border: "1px solid rgba(245,158,11,.4)", borderRadius: 6, fontWeight: 700, fontSize: 12, padding: "4px 10px" }}>
+            ♻️ Unstick
           </button>
           <Link href={`/projects/${id}/episodes/${epId}/final-video`}
             className="btn btn-sm"

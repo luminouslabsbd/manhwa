@@ -1,40 +1,77 @@
 import { getPodConfig } from "@/lib/pod-config";
-import { getAppConfig } from "@/lib/app-config";
 import HostConfigForm from "./HostConfigForm";
-import VideoModelForm from "./VideoModelForm";
+import CleanupStaleForm from "./CleanupStaleForm";
+import SecretsForm from "./SecretsForm";
+import SettingsTabs, { type TabDef } from "./SettingsTabs";
 
 export default async function SettingsPage() {
   const cfg = getPodConfig();
-  const app = await getAppConfig();
 
-  const initial = {
+  const initialHosts = {
     comfyuiHost: cfg.comfyuiHost ?? "",
     videoHost:   cfg.videoHost ?? "",
     ollamaHost:  cfg.ollamaHost ?? "",
     ttsHost:     cfg.ttsHost ?? "",
   };
 
+  // The former "Workflows" tab (active-model picker) was merged into
+  // /admin/models — each catalog row now has a "Set as active" button that
+  // writes the same AppConfig fields. Settings keeps only app-level config
+  // that doesn't belong on the per-row catalog view.
+  const tabs: TabDef[] = [
+    {
+      id: "secrets",
+      label: "API Keys",
+      hint: "Secrets & tokens",
+      content: (
+        <div className="card" style={{ padding: 28 }}>
+          <h2 style={{ margin: "0 0 8px", fontSize: 16, fontWeight: 700 }}>API Keys &amp; Secrets</h2>
+          <p style={{ margin: "0 0 18px", fontSize: 12, color: "var(--muted)" }}>
+            Stored in <code>app_secrets</code> (preferred) with <code>.env</code> as fallback.
+            Rotation takes effect within 30s without restart. Values are only shown masked.
+          </p>
+          <SecretsForm />
+        </div>
+      ),
+    },
+    {
+      id: "hosts",
+      label: "Hosts",
+      hint: "Service URLs",
+      content: (
+        <div className="card" style={{ padding: 28 }}>
+          <h2 style={{ margin: "0 0 20px", fontSize: 16, fontWeight: 700 }}>Host Configuration</h2>
+          <HostConfigForm initial={initialHosts} />
+        </div>
+      ),
+    },
+    {
+      id: "maintenance",
+      label: "Maintenance",
+      hint: "Cleanup tools",
+      content: (
+        <div className="card" style={{ padding: 28 }}>
+          <h2 style={{ margin: "0 0 8px", fontSize: 16, fontWeight: 700 }}>Maintenance</h2>
+          <p style={{ margin: "0 0 18px", fontSize: 12, color: "var(--muted)" }}>
+            Sweep orphan generations that got stuck as <code>running</code> after a pod restart or crash.
+            Anything older than 15 minutes is marked <code>failed</code> so regeneration is unblocked.
+          </p>
+          <CleanupStaleForm />
+        </div>
+      ),
+    },
+  ];
+
   return (
-    <div style={{ display: "flex", flexDirection: "column", gap: 28 }}>
+    <div style={{ display: "flex", flexDirection: "column", gap: 20 }}>
       <div>
         <h1 style={{ fontSize: 22, fontWeight: 800, margin: "0 0 4px" }}>Settings</h1>
         <p style={{ margin: 0, fontSize: 13, color: "var(--muted)" }}>
-          Configure service endpoints for generation. Changes take effect immediately — no restart needed.
+          Secrets, host endpoints, and maintenance tools. Per-category active models live in{" "}
+          <a href="/admin/models" style={{ color: "var(--accent)" }}>Models</a>.
         </p>
       </div>
-
-      <div className="card" style={{ padding: 28 }}>
-        <h2 style={{ margin: "0 0 8px", fontSize: 16, fontWeight: 700 }}>Video Model</h2>
-        <p style={{ margin: "0 0 18px", fontSize: 12, color: "var(--muted)" }}>
-          Model used for the image-to-video step. Pods are provisioned with LTX-Video 0.9.7 distilled only.
-        </p>
-        <VideoModelForm initial={app.video_model} />
-      </div>
-
-      <div className="card" style={{ padding: 28 }}>
-        <h2 style={{ margin: "0 0 20px", fontSize: 16, fontWeight: 700 }}>Host Configuration</h2>
-        <HostConfigForm initial={initial} />
-      </div>
+      <SettingsTabs tabs={tabs} />
     </div>
   );
 }

@@ -1,11 +1,24 @@
-const API_KEY = process.env.RUNPOD_API_KEY!;
-const GQL = `https://api.runpod.io/graphql?api_key=${API_KEY}`;
+import { getSecret } from "@/lib/secrets";
+
+/**
+ * Per-call RunPod key resolution (DB override → env fallback). Previously the
+ * module cached process.env.RUNPOD_API_KEY at import time; rotating the key
+ * from the Settings UI would then require an app restart. The getSecret
+ * helper has a 30s cache so the overhead here is one DB lookup per 30s.
+ */
+async function getRunpodApiKey(): Promise<string> {
+  const key = await getSecret("RUNPOD_API_KEY");
+  if (!key) throw new Error("RUNPOD_API_KEY not set — add it in /admin/settings or the env.");
+  return key;
+}
 
 async function gql(query: string, variables: Record<string, unknown> = {}, timeoutMs = 15000) {
+  const apiKey = await getRunpodApiKey();
+  const url = `https://api.runpod.io/graphql?api_key=${apiKey}`;
   const controller = new AbortController();
   const timeout = setTimeout(() => controller.abort(), timeoutMs);
   try {
-    const res = await fetch(GQL, {
+    const res = await fetch(url, {
       method: "POST",
       headers: { "Content-Type": "application/json" },
       body: JSON.stringify({ query, variables }),
@@ -126,7 +139,42 @@ export interface PodComponents {
   ollama?: boolean;  // Ollama LLM server on :11434
   sdxl?: boolean;    // SDXL checkpoints (animagine + juggernaut, ~10 GB)
   flux?: boolean;    // FLUX.1-schnell + CLIPs + AE VAE (~20 GB)
-  video?: boolean;   // Wan 2.1 t2v/i2v models (~20 GB)
+  video?: boolean;   // LTX Video 13B 0.9.7 distilled (~37 GB)
+}
+
+/**
+ * Per-category short tag used in pod names. The pod name reflects which
+ * services run on it (image / video / tts / llm), not the specific models.
+ * This keeps names stable when the admin adds model variants, and short
+ * enough to fit RunPod's ~60-char name field.
+ */
+const CATEGORY_TAG: Record<string, string> = {
+  image:   "img",
+  video:   "vid",
+  tts:     "tts",
+  content: "llm",
+};
+
+// Stable ordering so the same set of services always produces the same name
+// regardless of modelIds order (e.g. image+tts always renders as "img-tts").
+const CATEGORY_ORDER: readonly string[] = ["image", "video", "tts", "content"];
+
+/**
+ * Build a pod name from the set of service categories the selected catalog
+ * models belong to. Duplicates collapse — picking flux-schnell + sdxl-base
+ * (both `image`) still yields one `img` tag. When nothing was selected, we
+ * fall back to the GPU-derived legacy name for back-compat.
+ */
+export function buildPodName(gpuTypeId: string, categories?: string[] | null): string {
+  const stamp = Date.now().toString(36);
+  if (categories && categories.length > 0) {
+    const tags = CATEGORY_ORDER
+      .filter((c) => categories.includes(c))
+      .map((c) => CATEGORY_TAG[c])
+      .filter(Boolean);
+    if (tags.length) return `ti-${tags.join("-")}-${stamp}`;
+  }
+  return `ti-${gpuTypeId.replace(/[^a-zA-Z0-9]/g, "").slice(0, 20).toLowerCase()}-${stamp}`;
 }
 
 export interface CreatePodInput {
@@ -138,6 +186,29 @@ export interface CreatePodInput {
   ollamaModel?: string;
   cloudType?: "COMMUNITY" | "SECURE";
   components?: PodComponents;
+  /**
+   * Explicit pod name override. When omitted, derived from `gpuTypeId`.
+   * Callers that know the selected model set should pass
+   * `buildPodName(gpuTypeId, modelIds)` so the RunPod dashboard shows what's
+   * actually on the pod (e.g. `ti-ltxd-xtts-qwen-mo5vjyof`).
+   */
+  name?: string;
+  /**
+   * Concatenated install scripts from catalog Model rows that aren't in the
+   * canonical SDXL/FLUX/VIDEO presets. Plain text (not base64) — `createPod`
+   * encodes it before sending. Runs at the end of pod-setup.sh.
+   */
+  extraInstallScript?: string;
+  /**
+   * Which TTS backend(s) to install. Maps to the TTS_ENGINES env var (CSV)
+   * read by pod-setup.sh. Multiple engines can coexist on one pod — each
+   * gets its own Flask server on its own port (5000=edge, 5001=xtts,
+   * 5002=whisperspeech, 5003=mms). `ttsEngine` (singular, legacy) is still
+   * accepted and gets wrapped into a one-element list.
+   */
+  ttsEngines?: Array<"edge-tts" | "xtts-v2" | "mms-tts-bengali" | "whisperspeech">;
+  /** @deprecated Use `ttsEngines`. Kept for older callers. */
+  ttsEngine?: "edge-tts" | "xtts-v2" | "mms-tts-bengali" | "whisperspeech";
 }
 
 export class NoCapacityError extends Error {
@@ -157,7 +228,18 @@ export async function createPod(input: CreatePodInput): Promise<{ id: string; cl
     ollamaModel = "qwen2.5:7b",
     cloudType = "COMMUNITY",
     components = {},
+    extraInstallScript = "",
+    ttsEngine,
+    ttsEngines,
+    name: nameOverride,
   } = input;
+
+  // Resolve the final engine list: prefer the plural form, fall back to the
+  // deprecated singular, default to edge-tts when nothing is specified.
+  const engineList = (ttsEngines && ttsEngines.length > 0)
+    ? ttsEngines
+    : [ttsEngine ?? "edge-tts" as const];
+  const ttsEnginesCsv = Array.from(new Set(engineList)).join(",");
 
   // Default all-on when `components` is empty (back-compat). Otherwise honor
   // exactly what the caller passed, only flipping required deps.
@@ -188,7 +270,7 @@ export async function createPod(input: CreatePodInput): Promise<{ id: string; cl
   ].join("; ");
 
   const body = {
-    name: `ti-${gpuTypeId.replace(/[^a-zA-Z0-9]/g, "").slice(0, 20).toLowerCase()}-${Date.now().toString(36)}`,
+    name: nameOverride ?? buildPodName(gpuTypeId, null),
     imageName: "nvidia/cuda:12.1.1-devel-ubuntu22.04",
     cloudType,
     gpuTypeIds: [gpuTypeId],
@@ -196,7 +278,9 @@ export async function createPod(input: CreatePodInput): Promise<{ id: string; cl
     containerDiskInGb: 30,
     volumeInGb: 150,
     volumeMountPath: "/workspace",
-    ports: ["8188/http", "11434/http", "5000/http", "22/tcp"],
+    // TTS ports 5000–5003 are all exposed so multiple engines can coexist:
+    //   5000 edge-tts · 5001 xtts-v2 · 5002 whisperspeech · 5003 mms-tts-bengali
+    ports: ["8188/http", "11434/http", "5000/http", "5001/http", "5002/http", "5003/http", "22/tcp"],
     dockerEntrypoint: ["/bin/bash", "-lc", bootstrap],
     env: {
       SETUP_SCRIPT: setupScript,
@@ -210,16 +294,24 @@ export async function createPod(input: CreatePodInput): Promise<{ id: string; cl
       INSTALL_SDXL:    finalComp.sdxl    ? "1" : "0",
       INSTALL_FLUX:    finalComp.flux    ? "1" : "0",
       INSTALL_VIDEO:   finalComp.video   ? "1" : "0",
+      TTS_ENGINES: ttsEnginesCsv,
+      // Legacy singular var kept for older pod-setup.sh versions — the new
+      // script prefers TTS_ENGINES but reads TTS_ENGINE as a fallback.
+      TTS_ENGINE: engineList[0],
+      EXTRA_INSTALL_SCRIPT: extraInstallScript
+        ? Buffer.from(extraInstallScript, "utf8").toString("base64")
+        : "",
     },
   };
 
+  const apiKey = await getRunpodApiKey();
   const controller = new AbortController();
   const timeout = setTimeout(() => controller.abort(), 30000);
   try {
     const res = await fetch("https://rest.runpod.io/v1/pods", {
       method: "POST",
       headers: {
-        "Authorization": `Bearer ${API_KEY}`,
+        "Authorization": `Bearer ${apiKey}`,
         "Content-Type": "application/json",
       },
       body: JSON.stringify(body),

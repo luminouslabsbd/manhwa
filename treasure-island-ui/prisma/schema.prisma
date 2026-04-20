@@ -19,12 +19,75 @@ model User {
 }
 
 // Singleton row (id = "default") for global admin settings.
+// `*_model` fields are Model.id values (not enforced as FK — allows loose
+// coupling so deleting a Model row doesn't cascade into the config).
 model AppConfig {
-  id          String  @id @default("default")
-  video_model String  @default("ltx2") // "ltx2" — (legacy value "wan2" is no longer installed on pods)
-  updated_at  String
+  id                   String @id @default("default")
+  // Legacy — kept for backward compat, maps to active_video_model.
+  video_model          String @default("ltx2-distilled")
+  // Per-category active selections (FK to Model.id by convention).
+  active_image_model   String @default("flux-schnell")
+  active_video_model   String @default("ltx2-distilled")
+  active_tts_model     String @default("xtts-v2")
+  active_content_model String @default("qwen2.5-7b")
+  updated_at           String
 
   @@map("app_config")
+}
+
+// Catalog of models the platform knows how to run.
+// Rows are seeded and admin-editable. The `workflow_id` column is the key
+// that the runtime registry (src/lib/workflows/index.ts) uses to look up the
+// builder function. The `install_script` is pasted into the pod-setup.sh at
+// provision time when a pod opts into this model.
+model Model {
+  id              String  @id                   // stable slug, e.g. "ltx2-distilled"
+  category        String                        // "image" | "video" | "tts" | "content"
+  label           String                        // human-readable display name
+  description     String  @default("")
+  workflow_id     String                        // key in WORKFLOWS registry
+  install_script  String  @default("")          // bash that downloads weights / installs nodes
+  default_params  Json    @default("{}")        // {steps, cfg, width, height, frames, ...}
+  vram_gb         Int     @default(16)
+  disk_gb         Int     @default(10)
+  is_enabled      Boolean @default(true)        // false = hidden from selection UIs
+  is_default      Boolean @default(false)       // initial pick in pod-create wizard for its category
+  // Optional host URL for health probing — admin points this at a specific
+  // pod's proxy (e.g. ComfyUI for image/video, Ollama for content, Flask for
+  // tts) and the catalog Test button checks whether that pod actually has
+  // the model installed + serving. Leaving this empty uses the category's
+  // global active host at test time.
+  host            String  @default("")
+  created_at      String
+
+  @@index([category, is_enabled])
+  @@map("models")
+}
+
+// Admin-managed API keys and shared secrets. Name is the env-var-style key
+// (e.g. "HF_TOKEN", "RUNPOD_API_KEY"); value is stored as plaintext since DB
+// access is already SUPERADMIN-gated. Callers should go through
+// `lib/secrets.ts:getSecret()` which prefers this row then falls back to
+// `process.env[name]` so legacy deployments continue to work unchanged.
+model AppSecret {
+  name        String @id
+  value       String
+  description String @default("")
+  updated_at  String
+
+  @@map("app_secrets")
+}
+
+// Tracks which catalog Model.id values were selected for each RunPod pod
+// at creation time. RunPod itself stores the INSTALL_* env flags but not the
+// original model-id list, so we persist it locally to render "which models
+// are on this pod" in the admin UI. Removed on pod delete.
+model PodModel {
+  pod_id     String   @id
+  model_ids  String[]
+  created_at String
+
+  @@map("pod_models")
 }
 
 model Project {

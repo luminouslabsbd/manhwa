@@ -3,6 +3,7 @@ import { queuePrompt, buildImageWorkflow, buildShotFromBaseWorkflow, uploadImage
 import { randomUUID } from "crypto";
 import { readFileSync } from "fs";
 import path from "path";
+import { resolveActiveImageModel } from "@/lib/active-image-model";
 
 async function resolveRefImage(refImage: string, host: string): Promise<string> {
   if (!refImage.includes("/")) return refImage; // already a ComfyUI filename
@@ -33,8 +34,15 @@ export async function POST(req: Request, { params }: { params: Promise<{ id: str
     });
   }
 
-  // Model: explicit → shot → character → project
-  let model: string | null = body.model ?? shot.pipeline_model ?? char?.pipeline_model ?? project?.pipeline_model ?? null;
+  // Model: explicit → shot → character → project → active catalog model
+  const activeModel = await resolveActiveImageModel(body.model_id);
+  let model: string | null =
+    body.model
+      ?? shot.pipeline_model
+      ?? char?.pipeline_model
+      ?? project?.pipeline_model
+      ?? activeModel?.ckpt
+      ?? null;
 
   // Reference image: character ref → project base
   const refImageRaw = char?.reference_image ?? project?.base_image_path ?? null;

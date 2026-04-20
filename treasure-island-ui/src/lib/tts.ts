@@ -1,6 +1,6 @@
 import * as fs from "fs";
 import * as path from "path";
-import { resolveTtsHost } from "./pod-config";
+import { resolveActiveTtsHost } from "./active-tts-model";
 
 export interface TTSResult {
   audio_path: string;
@@ -11,10 +11,6 @@ export interface TTSOptions {
   voice?: string;
   language?: string;
   speed?: number;
-}
-
-function getTTSHost(): string {
-  return resolveTtsHost().replace(/\/$/, "");
 }
 
 /**
@@ -28,7 +24,10 @@ export async function generateSpeech(
 ): Promise<TTSResult> {
   const { voice = "default", language = "en", speed = 1.0 } = options;
 
-  const host = getTTSHost();
+  // Reads the active TTS model's catalog host first (so picking XTTS in
+  // Settings routes to port 5001 on the pod), falls back to the legacy
+  // `ttsHost` pod-config slot.
+  const host = await resolveActiveTtsHost();
 
   // Step 1: request generation
   const genRes = await fetch(`${host}/api/tts/generate`, {

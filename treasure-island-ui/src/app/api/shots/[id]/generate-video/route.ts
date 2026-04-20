@@ -1,7 +1,9 @@
 import { load } from "@/lib/db";
 import { prisma } from "@/lib/prisma";
-import { queuePrompt, buildLTX2_I2VWorkflow, buildI2VWorkflow, uploadImage, getVideoHost, resolveAvailableCheckpoint, type VideoQualityPreset, VIDEO_QUALITY_PRESETS } from "@/lib/comfyui";
+import { queuePrompt, buildI2VWorkflow, uploadImage, getVideoHost, resolveAvailableCheckpoint, type VideoQualityPreset, VIDEO_QUALITY_PRESETS } from "@/lib/comfyui";
 import { getPodConfig } from "@/lib/pod-config";
+import { getAppConfig } from "@/lib/app-config";
+import { getVideoBuilder, ModelNotInstalledError, UnknownWorkflowError } from "@/lib/workflows";
 import { fetchGenerated } from "@/lib/storage";
 import { randomUUID } from "crypto";
 
@@ -32,12 +34,31 @@ export async function POST(req: Request, { params }: { params: Promise<{ id: str
 
   if (!approvedIds.length) return Response.json({ error: "No approved images" }, { status: 400 });
 
-  // Prevent duplicate submissions — skip if a video generation is already running for this shot
+  // Prevent duplicate submissions — skip only if a recent in-flight job exists.
+  // Older "running" records are orphans (pod restart / crash — the prompt_id is
+  // on a pod that no longer exists) and should be auto-healed so regeneration
+  // can proceed. LTX distilled finishes in ~1–3 min; 15 min is a safe buffer.
+  // Callers can also pass body.force=true to supersede unconditionally.
+  const STALE_MS = 15 * 60 * 1000;
   const alreadyRunning = await prisma.generation.findFirst({
     where: { shot_id: id, type: { startsWith: "video" }, status: "running" },
+    orderBy: { created_at: "desc" },
   });
-  if (alreadyRunning) {
-    return Response.json({ ok: true, queued: 0, skipped: true, reason: "Already generating" });
+  if (alreadyRunning && !body.force) {
+    const ageMs = Date.now() - new Date(alreadyRunning.created_at).getTime();
+    if (ageMs < STALE_MS) {
+      return Response.json({ ok: true, queued: 0, skipped: true, reason: "Already generating" });
+    }
+    // Mark orphan as failed and fall through to queue a fresh one.
+    await prisma.generation.update({
+      where: { id: alreadyRunning.id },
+      data: { status: "failed", error: "timed out (pod likely restarted) — superseded by regeneration", completed_at: new Date().toISOString() },
+    });
+  } else if (alreadyRunning && body.force) {
+    await prisma.generation.update({
+      where: { id: alreadyRunning.id },
+      data: { status: "failed", error: "superseded by forced regeneration", completed_at: new Date().toISOString() },
+    });
   }
 
   const host = getVideoHost();
@@ -48,6 +69,22 @@ export async function POST(req: Request, { params }: { params: Promise<{ id: str
   const preset: VideoQualityPreset = (body.preset && body.preset in VIDEO_QUALITY_PRESETS)
     ? body.preset as VideoQualityPreset
     : configPreset;
+
+  // Resolve active video Model from catalog. Body override > app config.
+  const appCfg = await getAppConfig();
+  const requestedModelId = (body.model_id as string | undefined) ?? appCfg.active_video_model;
+  const videoModel = await prisma.model.findUnique({ where: { id: requestedModelId } });
+  if (!videoModel) {
+    return Response.json({
+      error: `Unknown video model "${requestedModelId}" — no Model row in catalog.`,
+    }, { status: 400 });
+  }
+  if (videoModel.category !== "video") {
+    return Response.json({
+      error: `Model "${videoModel.id}" is category "${videoModel.category}", not "video".`,
+    }, { status: 400 });
+  }
+  const modelParams = (videoModel.default_params ?? {}) as Record<string, unknown>;
 
   const seed = body.seed ?? Math.floor(Math.random() * 999999);
   let durationFrames = body.durationFrames ?? 0;
@@ -99,14 +136,32 @@ export async function POST(req: Request, { params }: { params: Promise<{ id: str
         const uploadData = await uploadImage(imgBuffer, imgName, host);
 
         try {
-          const wf = buildLTX2_I2VWorkflow(shot.full_prompt, uploadData.name, seed, durationFrames, preset);
+          // Dispatch to the primary workflow registered for the selected Model.
+          const builder = getVideoBuilder(videoModel.workflow_id);
+          const wf = builder({
+            prompt: shot.full_prompt,
+            imageName: uploadData.name,
+            seed,
+            frames: durationFrames,
+            params: modelParams,
+            preset,
+          });
           prompt_id = (await queuePrompt(wf, host)).prompt_id;
-          genType = "video:ltx2";
-        } catch (ltxErr) {
-          i2vError = ltxErr instanceof Error ? ltxErr.message : String(ltxErr);
+          genType = `video:${videoModel.id}`;
+        } catch (primaryErr) {
+          i2vError = primaryErr instanceof Error ? primaryErr.message : String(primaryErr);
           const msg = i2vError;
-          if (msg.includes("ltxv-13b") || msg.includes("not in list") || msg.includes("missing_node_type") || msg.includes("validation") || msg.includes("LTXV")) {
-            // LTX model or nodes unavailable — SDXL img2img last resort.
+          const looksLikeModelMissing =
+            primaryErr instanceof ModelNotInstalledError ||
+            primaryErr instanceof UnknownWorkflowError ||
+            msg.includes("not in list") ||
+            msg.includes("missing_node_type") ||
+            msg.includes("validation") ||
+            msg.includes("ltxv-13b") ||
+            msg.includes("LTXV");
+
+          if (looksLikeModelMissing) {
+            // Primary model isn't installed on this pod — drop to SDXL img2img.
             // Query the pod's actual checkpoint catalog so we don't hit "value_not_in_list"
             // when the env default (e.g. flux1-schnell) isn't loaded on an SDXL-only pod.
             const ckpt = await resolveAvailableCheckpoint(modelOverride, host);
@@ -114,10 +169,10 @@ export async function POST(req: Request, { params }: { params: Promise<{ id: str
             prompt_id = (await queuePrompt(fallbackWf, host)).prompt_id;
             genType = "video:i2v_fallback";
           } else if (msg.includes("aborted") || msg.includes("fetch failed") || msg.includes("ECONNRESET") || msg.includes("ETIMEDOUT")) {
-            // ComfyUI HTTP API unresponsive (pod busy generating) — save as queued for later
+            // ComfyUI HTTP API unresponsive (pod busy generating) — save as queued for later.
             podBusy = true;
           } else {
-            throw ltxErr;
+            throw primaryErr;
           }
         }
       } catch (uploadErr) {

@@ -14,6 +14,14 @@ const SERVICE_LABELS: Record<PodService, string> = {
 
 const SERVICE_ORDER: PodService[] = ["image", "video", "tts", "ollama"];
 
+type InstalledModel = {
+  id: string;
+  category: "image" | "video" | "tts" | "content" | "unknown";
+  label: string;
+  disk_gb: number;
+  known: boolean;
+};
+
 type RunPodPod = {
   id: string;
   name: string;
@@ -27,6 +35,7 @@ type RunPodPod = {
     ports: Array<{ ip: string; isIpPublic: boolean; privatePort: number; publicPort: number; type: string }>;
   } | null;
   machine: { gpuDisplayName: string; podHostId: string } | null;
+  installedModels?: InstalledModel[];
 };
 
 type GpuType = {
@@ -161,34 +170,38 @@ export default function PodManager({ initialConfig }: { initialConfig: PodConfig
     }
   };
 
-  const setHost = async (podId: string, selection: ServiceSelection) => {
+  const setHost = async (podId: string, selection: ServiceSelection, action: "set" | "clear" = "set") => {
     setBusy(podId);
     try {
       const r = await fetch(`/api/admin/pods/${podId}/set-host`, {
         method: "POST",
         headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({ services: selection }),
+        body: JSON.stringify({ services: selection, action }),
       });
       const d = await r.json();
       if (!r.ok || d.error) {
         toast(d.error || "Failed to set host", "err");
         return;
       }
+      // Replace the per-service host slots with whatever the server reports.
+      // The `action === "clear"` branch explicitly mirrors the server's
+      // omission (undefined) into our state, because the old `??` fallback
+      // on activePodId preserved the cleared id and left the checkbox stuck.
       setConfig((c) => ({
         ...c,
-        activePodId: d.activePodId ?? c.activePodId,
-        activeImagePodId: d.activeImagePodId,
-        activeVideoPodId: d.activeVideoPodId,
-        activeOllamaPodId: d.activeOllamaPodId,
-        activeTtsPodId: d.activeTtsPodId,
-        comfyuiHost: d.comfyui,
-        videoHost: d.video,
-        ollamaHost: d.ollama,
-        ttsHost: d.tts,
+        activePodId:       d.activePodId       ?? (action === "clear" && c.activePodId       === podId ? undefined : c.activePodId),
+        activeImagePodId:  d.activeImagePodId  ?? undefined,
+        activeVideoPodId:  d.activeVideoPodId  ?? undefined,
+        activeOllamaPodId: d.activeOllamaPodId ?? undefined,
+        activeTtsPodId:    d.activeTtsPodId    ?? undefined,
+        comfyuiHost:       d.comfyui          ?? undefined,
+        videoHost:         d.video            ?? undefined,
+        ollamaHost:        d.ollama           ?? undefined,
+        ttsHost:           d.tts              ?? undefined,
       }));
       const names = (selection === "all" ? SERVICE_ORDER : selection)
         .map((s) => SERVICE_LABELS[s as PodService]).join(", ");
-      toast(`${names} → ${podId}`);
+      toast(action === "clear" ? `${names} cleared from ${podId}` : `${names} → ${podId}`);
     } catch (e) {
       toast(String(e), "err");
     } finally {
@@ -208,7 +221,7 @@ export default function PodManager({ initialConfig }: { initialConfig: PodConfig
         </div>
         <div style={{ display: "flex", gap: 8 }}>
           <button onClick={loadPods} disabled={loading}
-            style={{ padding: "7px 14px", borderRadius: 6, border: "1px solid var(--border)", background: "transparent", cursor: "pointer", fontSize: 13 }}>
+            style={{ padding: "7px 14px", borderRadius: 6, border: "1px solid var(--border)", background: "transparent", cursor: "pointer", fontSize: 13, color: "var(--text)" }}>
             {loading ? "..." : "Refresh"}
           </button>
           <button onClick={() => setShowCreate(true)}
@@ -252,7 +265,9 @@ export default function PodManager({ initialConfig }: { initialConfig: PodConfig
                   activeServices={activeServices}
                   isBusy={busy === pod.id}
                   onAction={(action) => podAction(pod.id, action)}
-                  onSetHost={(sel) => setHost(pod.id, sel)}
+                  onSetHost={(sel: ServiceSelection, action?: "set" | "clear") => {
+                    void setHost(pod.id, sel, action);
+                  }}
                 />
               );
             })}
@@ -354,11 +369,34 @@ function PodRow({
   activeServices: PodService[];
   isBusy: boolean;
   onAction: (action: "start" | "stop" | "delete") => void;
-  onSetHost: (services: ServiceSelection) => void;
+  onSetHost: (services: ServiceSelection, action?: "set" | "clear") => void;
 }) {
   const isRunning = pod.desiredStatus === "RUNNING";
   const isActive = activeServices.length > 0;
   const [showLog, setShowLog] = useState(false);
+
+  // Which services this pod actually cares about — union of:
+  //   1. Services currently routed to this pod in pod-config (activeServices)
+  //   2. Services implied by the installed-model manifest (pod_models row)
+  //   3. Full set only as a last-resort legacy fallback (pre-manifest pods)
+  // This is what the health strip shows and what we probe from the backend.
+  // Previously we always defaulted to "all", which made a TTS-only pod light
+  // up red for ComfyUI + Ollama that were never meant to be on it.
+  const relevantServices: PodService[] = (() => {
+    const set = new Set<PodService>(activeServices);
+    for (const m of pod.installedModels ?? []) {
+      if (m.category === "image")   set.add("image");
+      if (m.category === "video")   set.add("video");
+      if (m.category === "tts")     set.add("tts");
+      if (m.category === "content") set.add("ollama");
+    }
+    if (set.size > 0) return Array.from(set);
+    return ["image", "video", "tts", "ollama"];
+  })();
+
+  // Share one health fetch between the readiness strip and the per-model
+  // status line below it — both components read the same snapshot.
+  const health = usePodHealth(isRunning ? pod.id : null, relevantServices);
 
   return (
     <div style={{
@@ -417,10 +455,21 @@ function PodRow({
         </div>
       </div>
 
-      {/* Readiness strip — only for running pods. When a pod is assigned to
-          specific services we only probe those, so a TTS-only pod doesn't
-          light up red for ComfyUI being absent. */}
-      {isRunning && <PodHealthStrip podId={pod.id} activeServices={activeServices} />}
+      {/* Per-model manifest — what this pod was provisioned with, plus
+          per-model readiness derived from the shared health snapshot. */}
+      {pod.installedModels && pod.installedModels.length > 0 && (
+        <InstalledModelsStrip
+          podId={pod.id}
+          models={pod.installedModels}
+          health={health}
+          podRunning={isRunning}
+        />
+      )}
+
+      {/* Readiness strip — only for running pods. `relevantServices` filters
+          the pills to exactly the services this pod was provisioned with,
+          so a TTS-only pod never shows ComfyUI / Ollama as "down". */}
+      {isRunning && <PodHealthStrip health={health} services={relevantServices} />}
 
       {/* Log viewer */}
       {showLog && isRunning && <LogViewer podId={pod.id} />}
@@ -437,68 +486,183 @@ type HealthData = {
   urls: { comfyui: string; ollama: string; tts: string };
   services: { comfyui: Probe; ollama: Probe; tts: Probe };
   models: { loaded: boolean; checkpointCount: number };
+  _services?: PodService[];
 };
 
-function PodHealthStrip({ podId, activeServices }: { podId: string; activeServices: PodService[] }) {
+// Shared health poller — PodRow uses one instance and feeds the snapshot into
+// both PodHealthStrip and InstalledModelsStrip so there's only one network
+// call per pod row per 10 s.
+function usePodHealth(podId: string | null, activeServices: PodService[]): HealthData | null {
   const [data, setData] = useState<HealthData | null>(null);
-  const [loading, setLoading] = useState(true);
 
-  // Which services we actually care about for this pod. A pod that hasn't been
-  // assigned to anything is still probed in full so the operator can see what
-  // it's capable of before deciding its role.
   const services = activeServices.length > 0 ? activeServices : (["image", "video", "tts", "ollama"] as PodService[]);
-  const showComfy = services.includes("image") || services.includes("video");
-  const showTts = services.includes("tts");
-  const showOllama = services.includes("ollama");
   const servicesKey = services.slice().sort().join(",");
 
   useEffect(() => {
+    if (!podId) { setData(null); return; }
     let cancel = false;
     const load = async () => {
       try {
         const qs = new URLSearchParams({ services: servicesKey }).toString();
         const r = await fetch(`/api/admin/pods/${podId}/health?${qs}`, { cache: "no-store" });
         const d = await r.json();
-        if (!cancel) setData(d);
+        if (!cancel) setData({ ...d, _services: services });
       } catch {
-        // swallow — the strip just stays stale on a transient network blip
-      } finally {
-        if (!cancel) setLoading(false);
+        // transient — leave last snapshot in place
       }
     };
     load();
     const iv = setInterval(load, 10000);
     return () => { cancel = true; clearInterval(iv); };
+  // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [podId, servicesKey]);
 
-  if (loading && !data) {
-    return (
-      <div style={{ marginTop: 10, fontSize: 11, color: "var(--muted)" }}>
-        Checking services…
-      </div>
-    );
-  }
-  if (!data) return null;
+  return data;
+}
+
+function PodHealthStrip({ health, services }: { health: HealthData | null; services: PodService[] }) {
+  if (!health) return <div style={{ marginTop: 10, fontSize: 11, color: "var(--muted)" }}>Checking services…</div>;
+  // Explicitly-passed services — no more falling back to "all" here. The
+  // parent row computes this from the pod's manifest; we just render it.
+  const showComfy = services.includes("image") || services.includes("video");
+  const showTts = services.includes("tts");
+  const showOllama = services.includes("ollama");
 
   return (
     <div style={{
       marginTop: 10, padding: "8px 10px", borderRadius: 8, background: "rgba(0,0,0,0.03)",
       display: "flex", flexWrap: "wrap", gap: 10, alignItems: "center", fontSize: 12,
     }}>
-      {showComfy  && <HealthPill label="ComfyUI" probe={data.services.comfyui} url={data.urls.comfyui} />}
-      {showTts    && <HealthPill label="TTS"     probe={data.services.tts}     url={data.urls.tts} />}
-      {showOllama && <HealthPill label="Ollama"  probe={data.services.ollama}  url={data.urls.ollama} />}
+      {showComfy  && <HealthPill label="ComfyUI" probe={health.services.comfyui} url={health.urls.comfyui} />}
+      {showTts    && <HealthPill label="TTS"     probe={health.services.tts}     url={health.urls.tts} />}
+      {showOllama && <HealthPill label="Ollama"  probe={health.services.ollama}  url={health.urls.ollama} />}
       {showComfy && (
         <span style={{
           padding: "2px 8px", borderRadius: 999, fontWeight: 600,
-          background: data.models.loaded ? "#dcfce7" : "#fef3c7",
-          color: data.models.loaded ? "#166534" : "#92400e",
+          background: health.models.loaded ? "#dcfce7" : "#fef3c7",
+          color: health.models.loaded ? "#166534" : "#92400e",
         }}>
-          {data.models.loaded
-            ? `Models ready (${data.models.checkpointCount} ckpts)`
+          {health.models.loaded
+            ? `Models ready (${health.models.checkpointCount} ckpts)`
             : "Models downloading…"}
         </span>
       )}
+    </div>
+  );
+}
+
+// TTS engines bind unique ports now, so the single `services.tts` probe on
+// port 5000 stopped being authoritative. Each TTS row probes its own engine
+// port via this map.
+const TTS_PORT_BY_ID: Record<string, number> = {
+  "edge-tts":        5000,
+  "xtts-v2":         5001,
+  "whisperspeech":   5002,
+  "mms-tts-bengali": 5003,
+};
+
+// Per-engine TTS health probe. Fetches `/health` from each tts row's own
+// RunPod proxy URL and caches the result for 10s. Mirrors the strip's
+// parent health cadence so the chip colour and the aggregate bar stay
+// in sync without double-fetching.
+function useTtsEngineHealth(podId: string, modelIds: string[]): Record<string, { up: boolean; engine?: string; error?: string | null }> {
+  const [state, setState] = useState<Record<string, { up: boolean; engine?: string; error?: string | null }>>({});
+  const key = modelIds.slice().sort().join(",");
+
+  useEffect(() => {
+    if (!podId || !key) return;
+    let cancel = false;
+    const run = async () => {
+      const entries = await Promise.all(modelIds.map(async (id) => {
+        const port = TTS_PORT_BY_ID[id];
+        if (!port) return [id, { up: false, error: "no port mapping" }] as const;
+        const url = `https://${podId}-${port}.proxy.runpod.net/health`;
+        try {
+          const r = await fetch(url, { cache: "no-store", signal: AbortSignal.timeout(5000) });
+          if (!r.ok) return [id, { up: false, error: `HTTP ${r.status}` }] as const;
+          const d = await r.json();
+          return [id, { up: !d.error, engine: d.engine, error: d.error ?? null }] as const;
+        } catch (e) {
+          return [id, { up: false, error: e instanceof Error ? e.message : String(e) }] as const;
+        }
+      }));
+      if (cancel) return;
+      const next: Record<string, { up: boolean; engine?: string; error?: string | null }> = {};
+      for (const [id, v] of entries) next[id] = v;
+      setState(next);
+    };
+    run();
+    const iv = setInterval(run, 10000);
+    return () => { cancel = true; clearInterval(iv); };
+  // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [podId, key]);
+
+  return state;
+}
+
+// Per-model manifest row — one chip per catalog Model the pod was provisioned
+// with. Image/video chips use the shared ComfyUI probe; TTS chips use each
+// engine's own port probe (5000–5003); content chips use Ollama.
+function InstalledModelsStrip({ podId, models, health, podRunning }: {
+  podId: string;
+  models: InstalledModel[];
+  health: HealthData | null;
+  podRunning: boolean;
+}) {
+  const ttsIds = models.filter((m) => m.category === "tts" && m.known).map((m) => m.id);
+  const ttsHealth = useTtsEngineHealth(podRunning ? podId : "", ttsIds);
+
+  const serviceState = (m: InstalledModel): { color: string; bg: string; label: string } => {
+    if (!podRunning) return { color: "#6b7280", bg: "rgba(107,114,128,0.12)", label: "pod stopped" };
+    if (m.category === "image" || m.category === "video") {
+      if (!health) return { color: "#a1a1aa", bg: "rgba(161,161,170,0.12)", label: "checking…" };
+      const comfyUp = health.services.comfyui?.up;
+      if (!comfyUp) return { color: "#92400e", bg: "#fef3c7", label: "ComfyUI booting" };
+      if (!health.models.loaded) return { color: "#92400e", bg: "#fef3c7", label: "downloading" };
+      return { color: "#166534", bg: "#dcfce7", label: "ready" };
+    }
+    if (m.category === "tts") {
+      const p = ttsHealth[m.id];
+      if (!p) return { color: "#a1a1aa", bg: "rgba(161,161,170,0.12)", label: "checking…" };
+      if (p.up) return { color: "#166534", bg: "#dcfce7", label: "ready" };
+      if (p.error && p.error.length > 0 && !/HTTP 502/.test(p.error)) {
+        return { color: "#991b1b", bg: "#fee2e2", label: p.error.slice(0, 50) };
+      }
+      return { color: "#92400e", bg: "#fef3c7", label: "booting" };
+    }
+    if (m.category === "content") {
+      if (!health) return { color: "#a1a1aa", bg: "rgba(161,161,170,0.12)", label: "checking…" };
+      return health.services.ollama?.up
+        ? { color: "#166534", bg: "#dcfce7", label: "ready" }
+        : { color: "#92400e", bg: "#fef3c7", label: "Ollama booting" };
+    }
+    return { color: "#6b7280", bg: "rgba(107,114,128,0.12)", label: "unknown" };
+  };
+
+  return (
+    <div style={{
+      marginTop: 10, padding: "8px 10px", borderRadius: 8, border: "1px dashed var(--border)",
+      display: "flex", flexWrap: "wrap", gap: 8, alignItems: "center", fontSize: 12,
+    }}>
+      <span style={{ fontSize: 10, fontWeight: 700, color: "var(--muted)", textTransform: "uppercase", letterSpacing: 0.5, marginRight: 4 }}>
+        Installed models
+      </span>
+      {models.map((m) => {
+        const s = serviceState(m);
+        return (
+          <span key={m.id} title={`${m.id} · ${m.category}${m.known ? "" : " (not in catalog)"}`}
+            style={{
+              display: "inline-flex", alignItems: "center", gap: 6,
+              padding: "3px 9px", borderRadius: 999,
+              background: s.bg, color: s.color, fontWeight: 600,
+              border: m.known ? "none" : "1px dashed #ef4444",
+            }}>
+            <span style={{ fontSize: 9, textTransform: "uppercase", letterSpacing: 0.5, opacity: 0.75 }}>{m.category}</span>
+            <span>{m.label}</span>
+            <span style={{ fontSize: 10, opacity: 0.75 }}>· {s.label}</span>
+          </span>
+        );
+      })}
     </div>
   );
 }
@@ -523,7 +687,7 @@ function SetHostMenu({
 }: {
   disabled: boolean;
   activeServices: PodService[];
-  onSelect: (services: ServiceSelection) => void;
+  onSelect: (services: ServiceSelection, action?: "set" | "clear") => void;
 }) {
   const [open, setOpen] = useState(false);
   const ref = useRef<HTMLDivElement>(null);
@@ -537,15 +701,25 @@ function SetHostMenu({
     return () => document.removeEventListener("mousedown", close);
   }, [open]);
 
-  const pick = (sel: ServiceSelection) => {
+  // Clicking a service toggles it: currently owned by this pod → clear,
+  // otherwise → set. That lets the user remove a routing without needing
+  // to assign it to another pod first.
+  const toggleService = (s: PodService) => {
     setOpen(false);
-    onSelect(sel);
+    onSelect([s], activeServices.includes(s) ? "clear" : "set");
+  };
+  const assignAll = () => {
+    setOpen(false);
+    onSelect("all", "set");
+  };
+  const clearAll = () => {
+    setOpen(false);
+    // `"all"` + clear → backend unsets only the slots currently owned by
+    // this pod, leaving anything routed elsewhere untouched.
+    onSelect("all", "clear");
   };
 
-  const options: { label: string; sel: ServiceSelection; service?: PodService }[] = [
-    { label: "All services", sel: "all" },
-    ...SERVICE_ORDER.map((s) => ({ label: SERVICE_LABELS[s], sel: [s] as PodService[], service: s })),
-  ];
+  const hasAny = activeServices.length > 0;
 
   return (
     <div ref={ref} style={{ position: "relative" }}>
@@ -555,25 +729,58 @@ function SetHostMenu({
       </button>
       {open && (
         <div style={{
-          position: "absolute", top: "calc(100% + 4px)", right: 0, zIndex: 10, minWidth: 200,
+          position: "absolute", top: "calc(100% + 4px)", right: 0, zIndex: 10, minWidth: 220,
           background: "var(--bg)", border: "1px solid var(--border)", borderRadius: 8,
           boxShadow: "0 8px 24px rgba(0,0,0,0.12)", overflow: "hidden",
         }}>
-          {options.map((opt, i) => {
-            const isCurrent = opt.service ? activeServices.includes(opt.service) : false;
+          {/* Per-service toggles */}
+          {SERVICE_ORDER.map((s, i) => {
+            const isCurrent = activeServices.includes(s);
             return (
-              <button key={i} type="button" onClick={() => pick(opt.sel)}
+              <button key={s} type="button" onClick={() => toggleService(s)}
+                title={isCurrent ? `Click to stop routing ${SERVICE_LABELS[s]} to this pod` : `Click to route ${SERVICE_LABELS[s]} to this pod`}
                 style={{
-                  display: "flex", alignItems: "center", justifyContent: "space-between",
+                  display: "flex", alignItems: "center", justifyContent: "space-between", gap: 10,
                   width: "100%", textAlign: "left", padding: "8px 12px", background: "transparent",
                   border: "none", borderTop: i === 0 ? "none" : "1px solid var(--border)",
                   cursor: "pointer", fontSize: 12, color: "var(--text)",
                 }}>
-                <span>{opt.label}</span>
-                {isCurrent && <span style={{ color: "var(--accent)", fontSize: 11, fontWeight: 700 }}>✓</span>}
+                <span style={{ display: "inline-flex", alignItems: "center", gap: 8 }}>
+                  <span style={{
+                    display: "inline-block", width: 14, height: 14, borderRadius: 3,
+                    border: `1px solid ${isCurrent ? "var(--accent)" : "var(--border)"}`,
+                    background: isCurrent ? "var(--accent)" : "transparent",
+                    color: "#fff", fontSize: 10, lineHeight: "12px", textAlign: "center",
+                  }}>{isCurrent ? "✓" : ""}</span>
+                  {SERVICE_LABELS[s]}
+                </span>
+                <span style={{ color: "var(--muted)", fontSize: 10 }}>
+                  {isCurrent ? "clear" : "set"}
+                </span>
               </button>
             );
           })}
+
+          {/* Bulk actions */}
+          <div style={{ borderTop: "1px solid var(--border)", background: "rgba(0,0,0,0.02)" }}>
+            <button type="button" onClick={assignAll}
+              style={{
+                display: "block", width: "100%", textAlign: "left", padding: "8px 12px",
+                background: "transparent", border: "none", cursor: "pointer",
+                fontSize: 12, color: "var(--text)", fontWeight: 600,
+              }}>
+              Assign all services
+            </button>
+            <button type="button" onClick={clearAll} disabled={!hasAny}
+              style={{
+                display: "block", width: "100%", textAlign: "left", padding: "8px 12px",
+                background: "transparent", border: "none", borderTop: "1px solid var(--border)",
+                cursor: hasAny ? "pointer" : "not-allowed", opacity: hasAny ? 1 : 0.5,
+                fontSize: 12, color: "#ef4444", fontWeight: 600,
+              }}>
+              Clear from this pod
+            </button>
+          </div>
         </div>
       )}
     </div>
@@ -671,20 +878,62 @@ function CreatePodWizard({
   const [hideLowStock, setHideLowStock] = useState(false);
   const [cloudFilter, setCloudFilter] = useState<"any" | "community" | "secure">("any");
 
-  // Components to install. Derived "need comfyui" flag is auto-set when any model group is on.
-  type Components = { comfyui: boolean; tts: boolean; ollama: boolean; sdxl: boolean; flux: boolean; video: boolean };
-  const [comp, setComp] = useState<Components>({ comfyui: true, tts: true, ollama: true, sdxl: true, flux: true, video: true });
-  const effComfy = comp.comfyui || comp.sdxl || comp.flux || comp.video;
-  const applyPreset = (preset: "ollama_tts" | "image_sdxl" | "image_flux" | "video" | "full") => {
-    const presets: Record<string, Components> = {
-      ollama_tts:  { comfyui: false, tts: true, ollama: true,  sdxl: false, flux: false, video: false },
-      image_sdxl:  { comfyui: true,  tts: true, ollama: true,  sdxl: true,  flux: false, video: false },
-      image_flux:  { comfyui: true,  tts: true, ollama: true,  sdxl: false, flux: true,  video: false },
-      video:       { comfyui: true,  tts: true, ollama: true,  sdxl: false, flux: false, video: true },
-      full:        { comfyui: true,  tts: true, ollama: true,  sdxl: true,  flux: true,  video: true },
-    };
-    setComp(presets[preset]);
+  // Catalog-driven model picker. Selected Model.id values are sent to the
+  // backend, which translates them into INSTALL_* booleans + a custom
+  // EXTRA_INSTALL_SCRIPT for non-canonical entries.
+  type CatalogModel = {
+    id: string; category: "image" | "video" | "tts" | "content"; label: string;
+    description: string; vram_gb: number; disk_gb: number; is_default: boolean; is_enabled: boolean;
+    workflow_id: string;
   };
+  const [catalog, setCatalog] = useState<CatalogModel[]>([]);
+  const [catalogLoaded, setCatalogLoaded] = useState(false);
+  const [selectedIds, setSelectedIds] = useState<Set<string>>(new Set());
+
+  useEffect(() => {
+    let cancel = false;
+    fetch("/api/admin/models").then(async (r) => {
+      const d = await r.json();
+      if (cancel) return;
+      const list: CatalogModel[] = (d.models ?? []).filter((m: CatalogModel) => m.is_enabled);
+      setCatalog(list);
+      // Default selection: the catalog's per-category default rows. Mirrors
+      // the old "Everything" preset for first-time users.
+      setSelectedIds(new Set(list.filter((m) => m.is_default).map((m) => m.id)));
+      setCatalogLoaded(true);
+    }).catch(() => setCatalogLoaded(true));
+    return () => { cancel = true; };
+  }, []);
+
+  const toggleModel = (id: string) => {
+    setSelectedIds((prev) => {
+      const next = new Set(prev);
+      if (next.has(id)) next.delete(id); else next.add(id);
+      return next;
+    });
+  };
+
+  const applyPreset = (preset: "ollama_tts" | "image_sdxl" | "image_flux" | "video" | "full") => {
+    // Map presets to canonical catalog IDs. Anything not in the catalog is
+    // skipped silently (e.g. if the admin has deleted a row).
+    const want: Record<string, string[]> = {
+      ollama_tts: ["xtts-v2", "qwen2.5-7b"],
+      image_sdxl: ["xtts-v2", "qwen2.5-7b", "sdxl-base", "sdxl-juggernaut"],
+      image_flux: ["xtts-v2", "qwen2.5-7b", "flux-schnell"],
+      video:      ["xtts-v2", "qwen2.5-7b", "ltx2-distilled"],
+      full:       ["xtts-v2", "qwen2.5-7b", "flux-schnell", "sdxl-base", "sdxl-juggernaut", "ltx2-distilled"],
+    };
+    const ids = new Set(want[preset].filter((id) => catalog.find((m) => m.id === id)));
+    setSelectedIds(ids);
+  };
+
+  // Total estimated disk usage (informational — pod-setup skips already-present files).
+  const estDisk = catalog
+    .filter((m) => selectedIds.has(m.id))
+    .reduce((acc, m) => acc + m.disk_gb, 0);
+  const estVram = catalog
+    .filter((m) => selectedIds.has(m.id))
+    .reduce((acc, m) => Math.max(acc, m.vram_gb), 0);
 
   const options = [...gpuTypes]
     .filter((g) => g.memoryInGb >= minVram)
@@ -718,7 +967,7 @@ function CreatePodWizard({
         body: JSON.stringify({
           gpuTypeId: selectedGpu.id,
           cloudType,
-          components: { ...comp, comfyui: effComfy },
+          modelIds: Array.from(selectedIds),
         }),
       });
       const text = await r.text();
@@ -778,7 +1027,7 @@ function CreatePodWizard({
         {step === "select" && (
           <>
             <p style={{ fontSize: 13, color: "var(--muted)", margin: "0 0 8px" }}>
-              Select a GPU ({options.length} in stock). Pod auto-installs ComfyUI, Wan 2.1, and all models.
+              Select a GPU ({options.length} in stock). Pod auto-installs ComfyUI, LTX 2, and all models.
             </p>
             <details style={{ margin: "0 0 14px", fontSize: 12 }}>
               <summary style={{ cursor: "pointer", color: "var(--muted)" }}>What's Community vs Secure cloud?</summary>
@@ -795,7 +1044,7 @@ function CreatePodWizard({
               <label style={{ display: "flex", alignItems: "center", gap: 6 }}>
                 Min VRAM
                 <select value={minVram} onChange={(e) => setMinVram(Number(e.target.value))}
-                  style={{ padding: "3px 8px", borderRadius: 4, border: "1px solid var(--border)", fontSize: 12, background: "var(--bg)" }}>
+                  style={{ padding: "3px 8px", borderRadius: 4, border: "1px solid var(--border)", fontSize: 12, background: "var(--bg)", color: "var(--text)" }}>
                   <option value={0}>Any</option>
                   <option value={10}>10GB+</option>
                   <option value={16}>16GB+</option>
@@ -808,12 +1057,12 @@ function CreatePodWizard({
                 Max $/hr
                 <input type="number" min={0.1} max={10} step={0.1} value={maxPrice}
                   onChange={(e) => setMaxPrice(Number(e.target.value) || 10)}
-                  style={{ width: 60, padding: "3px 8px", borderRadius: 4, border: "1px solid var(--border)", fontSize: 12, background: "var(--bg)" }} />
+                  style={{ width: 60, padding: "3px 8px", borderRadius: 4, border: "1px solid var(--border)", fontSize: 12, background: "var(--bg)", color: "var(--text)" }} />
               </label>
               <label style={{ display: "flex", alignItems: "center", gap: 6 }}>
                 Cloud
                 <select value={cloudFilter} onChange={(e) => setCloudFilter(e.target.value as "any" | "community" | "secure")}
-                  style={{ padding: "3px 8px", borderRadius: 4, border: "1px solid var(--border)", fontSize: 12, background: "var(--bg)" }}>
+                  style={{ padding: "3px 8px", borderRadius: 4, border: "1px solid var(--border)", fontSize: 12, background: "var(--bg)", color: "var(--text)" }}>
                   <option value="any">Any</option>
                   <option value="community">Community only</option>
                   <option value="secure">Secure only</option>
@@ -834,36 +1083,64 @@ function CreatePodWizard({
               </div>
             )}
 
-            {/* Component picker — presets + per-component checkboxes */}
+            {/* Catalog-driven model picker. Each row is a Model in the
+                catalog — admins can add/remove rows in /admin/models. */}
             <div style={{ marginBottom: 14, padding: "10px 12px", borderRadius: 8, border: "1px solid var(--border)" }}>
-              <div style={{ fontSize: 12, fontWeight: 700, color: "var(--muted)", textTransform: "uppercase", letterSpacing: 0.5, marginBottom: 8 }}>
-                Components to install
+              <div style={{ display: "flex", justifyContent: "space-between", alignItems: "baseline", marginBottom: 8 }}>
+                <div style={{ fontSize: 12, fontWeight: 700, color: "var(--muted)", textTransform: "uppercase", letterSpacing: 0.5 }}>
+                  Models to install
+                </div>
+                <span style={{ fontSize: 11, color: "var(--muted)" }}>
+                  {selectedIds.size} selected · ~{estDisk} GB disk · ≥{estVram} GB VRAM
+                </span>
               </div>
+
               <div style={{ display: "flex", flexWrap: "wrap", gap: 6, marginBottom: 10 }}>
                 {[
-                  { id: "ollama_tts", label: "Ollama + TTS",    hint: "~5 GB · 3 min"  },
-                  { id: "image_sdxl", label: "Image (SDXL)",    hint: "~20 GB · 15 min" },
-                  { id: "image_flux", label: "Image (FLUX)",    hint: "~30 GB · 20 min" },
-                  { id: "video",      label: "Video (Wan 2.1)", hint: "~30 GB · 20 min" },
-                  { id: "full",       label: "Everything",      hint: "~70 GB · 30 min" },
+                  { id: "ollama_tts", label: "Ollama + TTS",    hint: "Lightweight pod (~5 GB)" },
+                  { id: "image_sdxl", label: "Image (SDXL)",    hint: "SDXL checkpoints (~20 GB)" },
+                  { id: "image_flux", label: "Image (FLUX)",    hint: "FLUX schnell (~30 GB)" },
+                  { id: "video",      label: "Video (LTX 2)",   hint: "LTX-Video distilled (~37 GB)" },
+                  { id: "full",       label: "Everything",      hint: "All canonical models (~70 GB)" },
                 ].map((p) => (
                   <button key={p.id} type="button"
                     onClick={() => applyPreset(p.id as "ollama_tts" | "image_sdxl" | "image_flux" | "video" | "full")}
                     title={p.hint}
-                    style={{ padding: "5px 10px", borderRadius: 6, border: "1px solid var(--border)", background: "transparent", cursor: "pointer", fontSize: 12 }}>
+                    style={{ padding: "5px 10px", borderRadius: 6, border: "1px solid var(--border)", background: "transparent", cursor: "pointer", fontSize: 12, color: "var(--text)" }}>
                     {p.label}
                   </button>
                 ))}
               </div>
-              <div style={{ display: "grid", gridTemplateColumns: "1fr 1fr", gap: 4, fontSize: 12 }}>
-                <CompCheckbox label="Ollama (LLM)"             checked={comp.ollama} onChange={(v) => setComp((c) => ({ ...c, ollama: v }))} />
-                <CompCheckbox label="TTS (edge-tts)"           checked={comp.tts}    onChange={(v) => setComp((c) => ({ ...c, tts: v }))} />
-                <CompCheckbox label="ComfyUI base (auto if models)" checked={effComfy} disabled={comp.sdxl || comp.flux || comp.video}
-                  onChange={(v) => setComp((c) => ({ ...c, comfyui: v }))} />
-                <CompCheckbox label="SDXL models (~10 GB)"     checked={comp.sdxl}   onChange={(v) => setComp((c) => ({ ...c, sdxl: v }))} />
-                <CompCheckbox label="FLUX models (~20 GB)"     checked={comp.flux}   onChange={(v) => setComp((c) => ({ ...c, flux: v }))} />
-                <CompCheckbox label="Wan 2.1 video (~20 GB)"   checked={comp.video}  onChange={(v) => setComp((c) => ({ ...c, video: v }))} />
-              </div>
+
+              {!catalogLoaded ? (
+                <p style={{ fontSize: 12, color: "var(--muted)", margin: 0 }}>Loading catalog…</p>
+              ) : catalog.length === 0 ? (
+                <p style={{ fontSize: 12, color: "var(--muted)", margin: 0 }}>
+                  No enabled models in catalog. Add some in <a href="/admin/models" style={{ color: "var(--accent)" }}>/admin/models</a>.
+                </p>
+              ) : (
+                (["image", "video", "tts", "content"] as const).map((cat) => {
+                  const list = catalog.filter((m) => m.category === cat);
+                  if (list.length === 0) return null;
+                  return (
+                    <div key={cat} style={{ marginTop: 8 }}>
+                      <div style={{ fontSize: 11, fontWeight: 700, color: "var(--muted)", textTransform: "uppercase", letterSpacing: 0.5, marginBottom: 4 }}>
+                        {cat}
+                      </div>
+                      <div style={{ display: "grid", gridTemplateColumns: "1fr", gap: 3, fontSize: 12 }}>
+                        {list.map((m) => (
+                          <CompCheckbox
+                            key={m.id}
+                            label={`${m.label} · ${m.disk_gb} GB${m.is_default ? " · default" : ""}`}
+                            checked={selectedIds.has(m.id)}
+                            onChange={() => toggleModel(m.id)}
+                          />
+                        ))}
+                      </div>
+                    </div>
+                  );
+                })
+              )}
             </div>
             <div style={{ display: "flex", flexDirection: "column", gap: 8 }}>
               {options.map((gpu) => (
@@ -904,7 +1181,7 @@ function CreatePodWizard({
             </label>
 
             <div style={{ display: "flex", gap: 8, marginTop: 20, justifyContent: "flex-end", flexWrap: "wrap" }}>
-              <button onClick={onClose} style={{ padding: "8px 16px", borderRadius: 8, border: "1px solid var(--border)", background: "transparent", cursor: "pointer", fontSize: 13 }}>
+              <button onClick={onClose} style={{ padding: "8px 16px", borderRadius: 8, border: "1px solid var(--border)", background: "transparent", cursor: "pointer", fontSize: 13, color: "var(--text)" }}>
                 Cancel
               </button>
               {canRetrySecure && selectedGpu?.securePrice && (
@@ -1082,7 +1359,7 @@ function IdleSettings({ config, onUpdate }: { config: PodConfig; onUpdate: (c: P
             {saving ? "Saving..." : "Save"}
           </button>
           <button onClick={checkNow}
-            style={{ padding: "6px 14px", borderRadius: 6, border: "1px solid var(--border)", background: "transparent", cursor: "pointer", fontSize: 12 }}>
+            style={{ padding: "6px 14px", borderRadius: 6, border: "1px solid var(--border)", background: "transparent", cursor: "pointer", fontSize: 12, color: "var(--text)" }}>
             Check Now
           </button>
           <span style={{ fontSize: 11, color: "var(--muted)" }}>

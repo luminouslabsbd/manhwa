@@ -581,20 +581,26 @@ export function buildLTX2_I2VWorkflow(
   seed: number,
   durationFrames: number = 97,
   preset: VideoQualityPreset = "balanced",
+  ckptOverride?: string,
+  stepsOverride?: number,
+  cfgOverride?: number,
 ) {
   const prefix = `studio/ltx2_${Date.now()}`;
   const { fps: FPS, maxFrames } = VIDEO_QUALITY_PRESETS[preset];
   // LTX requires frames divisible by 8 plus 1
   const clampedFrames = Math.min(durationFrames, maxFrames);
   const frames = Math.max(9, Math.round((clampedFrames - 1) / 8) * 8 + 1);
-  // Distilled model: 8 steps is the sweet spot, cfg=1.0 (no classifier-free guidance).
-  const steps = 8;
-  const cfg = 1.0;
+  // Distilled model sweet-spot is 8 steps cfg=1.0. Full-precision "dev"
+  // variant needs ~20 steps cfg=3.0 — the catalog row sets these via
+  // default_params and the registry passes them in as overrides.
+  const steps = stepsOverride ?? 8;
+  const cfg = cfgOverride ?? 1.0;
+  const ckpt = ckptOverride ?? "ltxv-13b-0.9.7-distilled.safetensors";
 
   return {
     "1": {
       class_type: "CheckpointLoaderSimple",
-      inputs: { ckpt_name: "ltxv-13b-0.9.7-distilled.safetensors" },
+      inputs: { ckpt_name: ckpt },
     },
     "2": {
       class_type: "CLIPLoader",

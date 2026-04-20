@@ -281,7 +281,7 @@ export default function ShotEditor({ shot, onClose, onSaved, onNavigate, charact
   }
 
   async function handleRetryVideo() {
-    const res = await fetch(`/api/shots/${shot.id}/generate-video`, { method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify({}) });
+    const res = await fetch(`/api/shots/${shot.id}/generate-video`, { method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify({ force: true }) });
     const d = await res.json().catch(() => ({}));
     if (!res.ok) toast(`Video error: ${d.error ?? res.statusText}`, "error");
     else if (d.skipped) toast("Already generating — wait for current render to finish", "warning");

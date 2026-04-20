@@ -3,6 +3,7 @@ import { queuePrompt, buildImageWorkflow, uploadImage, getHost } from "@/lib/com
 import { randomUUID } from "crypto";
 import fs from "fs";
 import path from "path";
+import { resolveActiveImageModel } from "@/lib/active-image-model";
 
 // GET — return current base image info
 export async function GET(_: Request, { params }: { params: Promise<{ id: string }> }) {
@@ -28,7 +29,11 @@ export async function POST(req: Request, { params }: { params: Promise<{ id: str
   if (!project) return Response.json({ error: "Not found" }, { status: 404 });
 
   const host = getHost();
-  const modelOverride = project.pipeline_model;
+  // Project-level override wins; otherwise fall back to the active catalog
+  // model so selecting "FLUX Schnell" in /admin/settings actually takes effect
+  // on projects that haven't pinned their own pipeline_model.
+  const activeModel = await resolveActiveImageModel();
+  const modelOverride = project.pipeline_model ?? activeModel?.ckpt ?? null;
 
   // ── Upload mode (multipart form) ──
   if (contentType.includes("multipart/form-data")) {
@@ -60,10 +65,12 @@ export async function POST(req: Request, { params }: { params: Promise<{ id: str
   const body = await req.json().catch(() => ({}));
   const prompt = body.prompt || `${project.name}, masterpiece, best quality, detailed anime illustration, manhwa style`;
   const seed = body.seed ?? Math.floor(Math.random() * 999999);
-  const width = body.width ?? 832;
-  const height = body.height ?? 480;
+  const p = activeModel?.params ?? {};
+  const width  = body.width  ?? (typeof p.width  === "number" ? p.width  : 832);
+  const height = body.height ?? (typeof p.height === "number" ? p.height : 480);
+  const steps  = body.steps  ?? (typeof p.steps  === "number" ? p.steps  : 20);
 
-  const wf = buildImageWorkflow(prompt, seed, width, height, 20, modelOverride);
+  const wf = buildImageWorkflow(prompt, seed, width, height, steps, modelOverride);
   const { prompt_id } = await queuePrompt(wf, host);
 
   // Create a generation record for tracking

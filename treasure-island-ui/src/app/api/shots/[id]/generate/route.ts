@@ -3,6 +3,7 @@ import { prisma } from "@/lib/prisma";
 import { randomUUID } from "crypto";
 import { readFileSync } from "fs";
 import path from "path";
+import { resolveActiveImageModel } from "@/lib/active-image-model";
 
 async function resolveRefImage(refImage: string, host: string): Promise<string> {
   if (!refImage.includes("/")) return refImage;
@@ -29,9 +30,34 @@ export async function POST(req: Request, { params }: { params: Promise<{ id: str
     ? await prisma.character.findFirst({ where: { project_id: shot.project_id, name: { equals: shot.character, mode: "insensitive" } } })
     : null;
 
-  // Model resolution: explicit body → shot → character → project → env default
+  // Model resolution order:
+  //   1. Explicit per-call override (body.model, a ComfyUI filename)
+  //   2. Per-shot / per-character / per-project pipeline_model (legacy fields
+  //      populated by older flows that predate the Model catalog)
+  //   3. Active image Model from the catalog (AppConfig.active_image_model),
+  //      resolved via resolveActiveImageModel() which maps catalog slug →
+  //      ComfyUI checkpoint filename + merges default_params
+  //   4. process.env.COMFYUI_MODEL fallback, finally "default"
+  // Step 3 is the new bit — prior to this, the Settings "active image model"
+  // picker had no effect on generation.
+  const activeModel = await resolveActiveImageModel(body.model_id);
+  const catalogOverride = activeModel?.ckpt ?? null;
   const modelOverride: string =
-    body.model ?? shot.pipeline_model ?? char?.pipeline_model ?? project?.pipeline_model ?? process.env.COMFYUI_MODEL ?? "default";
+    body.model
+      ?? shot.pipeline_model
+      ?? char?.pipeline_model
+      ?? project?.pipeline_model
+      ?? catalogOverride
+      ?? process.env.COMFYUI_MODEL
+      ?? "default";
+
+  // Merge catalog-level defaults (steps/cfg/width/height) when the shot row
+  // hasn't stored a value. Shot values still win — admins editing a specific
+  // shot's steps in the UI keep their customisation.
+  const p = activeModel?.params ?? {};
+  const effSteps  = shot.steps  ?? (typeof p.steps  === "number" ? p.steps  : 25);
+  const effWidth  = shot.width  ?? (typeof p.width  === "number" ? p.width  : 1024);
+  const effHeight = shot.height ?? (typeof p.height === "number" ? p.height : 1024);
 
   const loras: LoraSpec[] | undefined = body.loras;
   const seed: number = body.seed ?? Math.floor(Math.random() * 999999);
@@ -73,20 +99,20 @@ export async function POST(req: Request, { params }: { params: Promise<{ id: str
 
           if (refImage) {
             try {
-              const wf = buildShotFromBaseWorkflow(framePrompt, refImage, frameSeed, shot.width, shot.height, shot.steps, modelOverride, true, loras);
+              const wf = buildShotFromBaseWorkflow(framePrompt, refImage, frameSeed, effWidth, effHeight, effSteps, modelOverride, true, loras);
               prompt_id = (await queuePrompt(wf, host)).prompt_id;
             } catch {
               try {
-                const wf = buildShotFromBaseWorkflow(framePrompt, refImage, frameSeed, shot.width, shot.height, shot.steps, modelOverride, false, loras);
+                const wf = buildShotFromBaseWorkflow(framePrompt, refImage, frameSeed, effWidth, effHeight, effSteps, modelOverride, false, loras);
                 prompt_id = (await queuePrompt(wf, host)).prompt_id;
               } catch {
                 // Final fallback: text-to-image (no ref)
-                const wf = buildImageWorkflow(framePrompt, frameSeed, shot.width, shot.height, shot.steps, modelOverride, loras);
+                const wf = buildImageWorkflow(framePrompt, frameSeed, effWidth, effHeight, effSteps, modelOverride, loras);
                 prompt_id = (await queuePrompt(wf, host)).prompt_id;
               }
             }
           } else {
-            const wf = buildImageWorkflow(framePrompt, frameSeed, shot.width, shot.height, shot.steps, modelOverride, loras);
+            const wf = buildImageWorkflow(framePrompt, frameSeed, effWidth, effHeight, effSteps, modelOverride, loras);
             prompt_id = (await queuePrompt(wf, host)).prompt_id;
           }
 
@@ -123,14 +149,14 @@ export async function POST(req: Request, { params }: { params: Promise<{ id: str
     let prompt_id: string;
     if (refImage) {
       try {
-        const wf = buildShotFromBaseWorkflow(shot.full_prompt, refImage, seed, shot.width, shot.height, shot.steps, modelOverride, true, loras);
+        const wf = buildShotFromBaseWorkflow(shot.full_prompt, refImage, seed, effWidth, effHeight, effSteps, modelOverride, true, loras);
         prompt_id = (await queuePrompt(wf, host)).prompt_id;
       } catch {
-        const wf = buildShotFromBaseWorkflow(shot.full_prompt, refImage, seed, shot.width, shot.height, shot.steps, modelOverride, false, loras);
+        const wf = buildShotFromBaseWorkflow(shot.full_prompt, refImage, seed, effWidth, effHeight, effSteps, modelOverride, false, loras);
         prompt_id = (await queuePrompt(wf, host)).prompt_id;
       }
     } else {
-      const wf = buildImageWorkflow(shot.full_prompt, seed, shot.width, shot.height, shot.steps, modelOverride, loras);
+      const wf = buildImageWorkflow(shot.full_prompt, seed, effWidth, effHeight, effSteps, modelOverride, loras);
       prompt_id = (await queuePrompt(wf, host)).prompt_id;
     }
 

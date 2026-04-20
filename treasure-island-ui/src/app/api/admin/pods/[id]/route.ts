@@ -1,6 +1,7 @@
 import { getPodStatus, deletePod } from "@/lib/runpod";
 import { getPodConfig, savePodConfig } from "@/lib/pod-config";
 import { verifyAdmin } from "@/lib/dal";
+import { prisma } from "@/lib/prisma";
 
 export async function GET(_req: Request, { params }: { params: Promise<{ id: string }> }) {
   await verifyAdmin();
@@ -14,6 +15,9 @@ export async function DELETE(_req: Request, { params }: { params: Promise<{ id: 
   await verifyAdmin();
   const { id } = await params;
   await deletePod(id);
+  // Drop the local model-manifest row since the pod no longer exists.
+  // Best-effort — a missing row is not an error.
+  await prisma.podModel.deleteMany({ where: { pod_id: id } });
   // Clear any host pointers that reference this pod (per-service + legacy).
   const cfg = getPodConfig();
   const clears: Parameters<typeof savePodConfig>[0] = {};

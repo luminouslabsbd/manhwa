@@ -183,6 +183,9 @@ export default function ShotEditorNew({ shot, onClose, onSaved }: {
         headers: { "Content-Type": "application/json" },
         body: JSON.stringify({
           durationFrames,
+          // Supersede orphan "running" records from crashed/restarted pods
+          // so the user can always re-trigger from this panel.
+          force: true,
         }),
       });
 
